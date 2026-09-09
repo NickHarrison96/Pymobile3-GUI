@@ -1,0 +1,12 @@
+# Pymobile3-GUI Requirements
+# Core GUI framework
+PySide6>=6.6.0
+
+# iOS device communication
+pymobiledevice3>=3.0.0
+
+# System utilities
+psutil>=5.9.0
+
+# Async compatibility for AFC service
+nest-asyncio>=1.5.0

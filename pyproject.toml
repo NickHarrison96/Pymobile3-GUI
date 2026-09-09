@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pymobile3-gui"
+version = "0.1.0"
+description = "Standalone iOS forensic & developer toolkit"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "KushNick420"}]
+dependencies = [
+    "PySide6>=6.6.0",
+    "pymobiledevice3>=3.0.0",
+    "psutil>=5.9.0",
+    "nest-asyncio>=1.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pyinstaller>=6.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pymobile3_gui*"]
