@@ -17,9 +17,9 @@ try:
 except NameError:
     SPEC_DIR = Path.cwd().resolve()
 
-# The spec file lives in pymobile3_gui/ subdirectory
-PROJECT_ROOT = SPEC_DIR.parent
-SRC_DIR = SPEC_DIR
+# The spec file lives at project root; source package is pymobile3_gui/
+PROJECT_ROOT = SPEC_DIR
+SRC_DIR = PROJECT_ROOT / "pymobile3_gui"
 ASSETS_DIR = SRC_DIR / "assets"
 RESOURCES_DIR = PROJECT_ROOT / "resources"  # shared with RootForgeKit if any
 
@@ -153,6 +153,8 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=None,
+    distpath=DISTPATH,
+    workpath=WORKPATH,
 )
 
 coll = COLLECT(
@@ -164,4 +166,6 @@ coll = COLLECT(
     upx=True,
     upx_exclude=[],
     name="Pymobile3-GUI",
+    distpath=DISTPATH,
+    workpath=WORKPATH,
 )
