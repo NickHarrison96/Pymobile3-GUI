@@ -20,6 +20,7 @@ from pymobile3_gui.core.backend.tunnel_manager import (
     run_developer_command, get_tunnel_manager, is_admin
 )
 from pymobile3_gui.core.backend.resource_manager import safe_run_command
+from pymobile3_gui.core.backend.paths import pmd3_cmd
 
 
 # iOS 17+ auto-mount fetches a personalized DDI from Apple before mounting.
@@ -381,7 +382,7 @@ class DeveloperView(QWidget):
         self._show_busy("Enabling developer mode...")
         def run():
             ok, out = safe_run_command(
-                [sys.executable, "-m", "pymobiledevice3", "amfi", "enable-developer-mode"],
+                pmd3_cmd(["amfi", "enable-developer-mode"]),
                 timeout=30
             )
             return ok, out
@@ -403,7 +404,7 @@ class DeveloperView(QWidget):
         self._show_busy("Mounting Developer Disk Image (may download, please wait)...")
         def run():
             ok, out = safe_run_command(
-                [sys.executable, "-m", "pymobiledevice3", "mounter", "auto-mount"],
+                pmd3_cmd(["mounter", "auto-mount"]),
                 timeout=DDI_MOUNT_TIMEOUT
             )
             return ok, out
@@ -416,7 +417,7 @@ class DeveloperView(QWidget):
             self._show_busy("Verifying DDI mount...")
             def verify():
                 ok2, out2 = safe_run_command(
-                    [sys.executable, "-m", "pymobiledevice3", "mounter", "list"],
+                    pmd3_cmd(["mounter", "list"]),
                     timeout=30
                 )
                 return ok2, out2
@@ -614,7 +615,7 @@ class DeveloperView(QWidget):
         """Check Developer Mode status on device and update UI."""
         def check():
             return safe_run_command(
-                [sys.executable, "-m", "pymobiledevice3", "amfi", "developer-mode-status"],
+                pmd3_cmd(["amfi", "developer-mode-status"]),
                 timeout=15
             )
 

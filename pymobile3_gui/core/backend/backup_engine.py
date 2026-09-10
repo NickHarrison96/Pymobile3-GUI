@@ -30,6 +30,7 @@ from datetime import datetime
 from PySide6.QtCore import QObject, Signal
 
 from pymobile3_gui.core.backend.process_runner import format_duration
+from pymobile3_gui.core.backend.paths import pmd3_cmd
 
 
 ACQUISITION_MODES = {
@@ -501,7 +502,7 @@ class AcquisitionWorker(QObject):
     # -------------------------------------------------------------------------
 
     def _base_cmd(self, args: list[str]) -> list[str]:
-        return [sys.executable, "-m", "pymobiledevice3"] + args
+        return pmd3_cmd(args)
 
     def _popen_kwargs(self) -> dict:
         kwargs = {

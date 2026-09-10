@@ -36,6 +36,31 @@ def is_frozen() -> bool:
     return getattr(sys, "frozen", False)
 
 
+# Argv sentinel that makes this executable behave as the pymobiledevice3 CLI.
+# See pmd3_cmd() and the dispatch at the top of pymobile3_gui.main.main().
+PMD3_ARGV_FLAG = "--run-pymobiledevice3"
+
+
+def pmd3_cmd(args: list[str]) -> list[str]:
+    """
+    Command line that runs `pymobiledevice3 <args>`, frozen or from source.
+
+    This is the single most important frozen-vs-source difference in the app.
+    From source, sys.executable is python.exe and `-m pymobiledevice3` works.
+    Once PyInstaller freezes the app, sys.executable is Pymobile3-GUI.exe and
+    the bootloader does NOT implement -m: it ignores the flag and starts the
+    GUI again. Every device operation would silently launch another copy of
+    this app instead of talking to the phone, which is precisely what "worked
+    as scripts, broke once compiled" looks like.
+
+    The bundle already contains pymobiledevice3, so the fix is to re-enter our
+    own executable with a sentinel flag and hand off to its CLI in-process.
+    """
+    if is_frozen():
+        return [sys.executable, PMD3_ARGV_FLAG, *args]
+    return [sys.executable, "-m", "pymobiledevice3", *args]
+
+
 # -----------------------------------------------------------------------------
 # Read-only: things we ship
 # -----------------------------------------------------------------------------

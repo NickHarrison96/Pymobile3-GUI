@@ -63,6 +63,9 @@ logger = logging.getLogger(__name__)
 # because the Developer view imports is_admin from this module.
 from pymobile3_gui.core.backend.elevation import is_admin  # noqa: E402,F401
 
+# Resolves `pymobiledevice3 <args>` correctly for both source and frozen builds.
+from pymobile3_gui.core.backend.paths import pmd3_cmd  # noqa: E402
+
 # Process manager for PID tracking
 from pymobile3_gui.core.process_manager import (
     set_tunneld_pid, register_child_pid, unregister_child_pid
@@ -261,7 +264,7 @@ class TunneldManager:
             )
 
     def _tunneld_cmd(self) -> list[str]:
-        return [sys.executable, "-m", "pymobiledevice3", "remote", "tunneld"]
+        return pmd3_cmd(["remote", "tunneld"])
 
     def _spawn_direct(self) -> tuple[bool, str]:
         """Start tunneld in-process (already privileged)."""
@@ -292,9 +295,13 @@ class TunneldManager:
             # Start-Process -Verb RunAs raises the UAC prompt.
             # Note: We can't easily get the PID when using Start-Process -Verb RunAs.
             # The process will be tracked by the process_manager cleanup (taskkill /IM tunneld.exe)
-            args = ",".join(f"'{a}'" for a in self._tunneld_cmd()[1:])
+            # Split the resolved command rather than assuming sys.executable —
+            # frozen and source builds differ in everything after argv[0].
+            cmd = self._tunneld_cmd()
+            program, cmd_args = cmd[0], cmd[1:]
+            args = ",".join(f"'{a}'" for a in cmd_args)
             ps = (
-                f"Start-Process -FilePath '{sys.executable}' "
+                f"Start-Process -FilePath '{program}' "
                 f"-ArgumentList {args} -Verb RunAs -WindowStyle Hidden"
             )
             res = subprocess.run(
@@ -510,7 +517,7 @@ class TunneldManager:
         try:
             from pymobile3_gui.core.backend.resource_manager import safe_run_command
             ok, out = safe_run_command(
-                [sys.executable, "-m", "pymobiledevice3", "amfi", "developer-mode-status"],
+                pmd3_cmd(["amfi", "developer-mode-status"]),
                 timeout=10
             )
             if ok and out:
@@ -604,7 +611,7 @@ def run_developer_command(args: list[str], timeout: int = 20,
             "Disconnect the others, or pass an explicit UDID."
         )
 
-    cmd = [sys.executable, "-m", "pymobiledevice3"] + args
+    cmd = pmd3_cmd(args)
     ok, out = safe_run_command(cmd, timeout=timeout, env=env)
 
     if not ok:

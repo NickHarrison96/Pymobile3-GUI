@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QProcess
 from PySide6.QtGui import QFont, QCursor
 from pymobile3_gui.ui.theme import Colors
+from pymobile3_gui.core.backend.paths import pmd3_cmd
 
 
 class SyslogView(QWidget):
@@ -119,7 +120,7 @@ class SyslogView(QWidget):
         self.process.started.connect(self._on_started)
 
         # Launch pymobiledevice3 syslog live
-        cmd = [sys.executable, "-m", "pymobiledevice3", "syslog", "live"]
+        cmd = pmd3_cmd(["syslog", "live"])
         self.process.start(cmd[0], cmd[1:])
 
         if not self.process.waitForStarted(5000):

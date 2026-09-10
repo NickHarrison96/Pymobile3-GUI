@@ -17,6 +17,7 @@ from PySide6.QtGui import QFont, QCursor
 from pymobile3_gui.ui.theme import Colors
 from pymobile3_gui.core.backend.file_system import FileSystemManager, AFCException
 from pymobile3_gui.core.backend.resource_manager import safe_run_command
+from pymobile3_gui.core.backend.paths import pmd3_cmd
 
 
 class IosFileLoadWorker(QThread):
@@ -49,7 +50,7 @@ class IosAppsWorker(QThread):
     error_signal = Signal(str)
 
     def run(self):
-        ok, out = safe_run_command([sys.executable, "-m", "pymobiledevice3", "apps", "list"], timeout=15)
+        ok, out = safe_run_command(pmd3_cmd(["apps", "list"]), timeout=15)
         if not ok:
             ok, out = safe_run_command(["pymobiledevice3", "apps", "list"], timeout=15)
 

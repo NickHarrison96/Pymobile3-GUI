@@ -26,6 +26,7 @@ from pymobile3_gui.core.device_poller import DevicePoller
 from pymobile3_gui.core.task_manager import TaskManager
 from pymobile3_gui.core.backend.tunnel_manager import get_tunnel_manager
 from pymobile3_gui.core.backend.elevation import is_admin, relaunch_as_admin
+from pymobile3_gui.core.backend.paths import PMD3_ARGV_FLAG
 
 from pymobile3_gui.views.device_view import DeviceView
 from pymobile3_gui.views.files_apps_view import FilesAppsView
@@ -257,7 +258,32 @@ def _ensure_elevated() -> bool:
     return False
 
 
+def _dispatch_pymobiledevice3() -> bool:
+    """
+    Act as the pymobiledevice3 CLI when re-entered with the sentinel flag.
+
+    Must run before ANY Qt object exists — this process is a short-lived CLI
+    invocation, not a GUI. Returns True when it handled the run (it normally
+    exits rather than returning).
+    """
+    if len(sys.argv) < 2 or sys.argv[1] != PMD3_ARGV_FLAG:
+        return False
+
+    from pymobiledevice3.__main__ import main as pmd3_main
+
+    sys.argv = ["pymobiledevice3", *sys.argv[2:]]
+    try:
+        pmd3_main()
+    except SystemExit as exc:
+        raise SystemExit(exc.code)
+    raise SystemExit(0)
+
+
 def main():
+    # Before elevation and before Qt: this may not be a GUI launch at all.
+    if _dispatch_pymobiledevice3():
+        return
+
     if _ensure_elevated():
         return
 

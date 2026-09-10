@@ -95,7 +95,14 @@ class StreamingProcessRunner(QObject):
         self._proc.setProcessEnvironment(proc_env)
 
         if use_module:
-            program, arguments = sys.executable, args
+            # Frozen, sys.executable is the GUI exe and it does not honour -m,
+            # so this must go through pmd3_cmd. args arrives in the historical
+            # ["-m", "pymobiledevice3", ...] shape; strip that prefix and let
+            # pmd3_cmd rebuild it correctly for the current build.
+            from pymobile3_gui.core.backend.paths import pmd3_cmd
+            tail = args[2:] if args[:2] == ["-m", "pymobiledevice3"] else args
+            resolved = pmd3_cmd(tail)
+            program, arguments = resolved[0], resolved[1:]
         else:
             program, arguments = args[0], args[1:]
 

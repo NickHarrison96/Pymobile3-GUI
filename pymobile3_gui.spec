@@ -8,6 +8,8 @@ import os
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
 # -----------------------------------------------------------------------------
 # Paths
 # -----------------------------------------------------------------------------
@@ -57,14 +59,6 @@ hiddenimports = [
     "PySide6.QtWidgets",
     "PySide6.QtNetwork",
     "PySide6.QtSvg",
-    # pymobiledevice3 submodules (dynamic imports)
-    "pymobiledevice3",
-    "pymobiledevice3.lockdown",
-    "pymobiledevice3.usbmux",
-    "pymobiledevice3.services.afc",
-    "pymobiledevice3.services.diagnostics",
-    "pymobiledevice3.remote",
-    "pymobiledevice3.exceptions",
     # stdlib modules used dynamically
     "asyncio",
     "json",
@@ -77,19 +71,67 @@ hiddenimports = [
     "nest_asyncio",
 ]
 
+# ---------------------------------------------------------------------------
+# pymobiledevice3 is re-entered as a CLI by this executable (see
+# paths.pmd3_cmd and main._dispatch_pymobiledevice3), so the WHOLE package has
+# to be present — not just the few modules the GUI imports directly.
+#
+# pymobiledevice3.__main__ resolves subcommands with importlib.import_module,
+# which PyInstaller's static analysis cannot follow: every pymobiledevice3.cli.*
+# module is invisible to it. Listing them by hand rots the moment upstream adds
+# a command, so collect the package wholesale.
+# ---------------------------------------------------------------------------
+hiddenimports += collect_submodules("pymobiledevice3")
+hiddenimports += ["pymobiledevice3.__main__"]
+
+# The CLI front end (typer/click stack) and the tunneld daemon's web server.
+# `remote tunneld` runs inside this same executable, so fastapi/uvicorn and the
+# binary-parsing stack must ship with it or the tunnel cannot start at all.
+for _pkg in (
+    "typer",
+    "typer_injector",
+    "click",
+    "coloredlogs",
+    "questionary",
+    "prompt_toolkit",
+    "tqdm",
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "construct",
+    "requests",
+    "packaging",
+    "pygments",
+):
+    try:
+        hiddenimports += collect_submodules(_pkg)
+    except Exception:
+        # Optional dependency absent from this environment — skip rather than
+        # fail the whole build.
+        pass
+
+# Data files: certifi's CA bundle, pymobiledevice3's bundled resources
+# (DDI manifests, plist templates) and anything typer/click ship.
+datas += collect_data_files("pymobiledevice3")
+for _pkg in ("certifi", "typer", "click"):
+    try:
+        datas += collect_data_files(_pkg)
+    except Exception:
+        pass
+
 # -----------------------------------------------------------------------------
 # Excludes (keep bundle lean)
 # -----------------------------------------------------------------------------
+# NOTE: http.server and unittest are deliberately NOT excluded. uvicorn (which
+# serves tunneld) reaches into the http stack, and excluding it produced a
+# tunnel that could not start in the frozen build.
 excludes = [
     "tkinter",
     "matplotlib",
-    "numpy",
     "scipy",
     "pandas",
     "PIL",
     "pytest",
-    "unittest",
-    "http.server",
     "xmlrpc",
 ]
 

@@ -5,6 +5,7 @@ and direct lockdown management controls.
 """
 
 import sys
+import asyncio
 import time
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -103,25 +104,35 @@ class DeviceWorker(QThread):
         self.operation = operation
         self.udid = udid
 
-    def run(self):
-        try:
-            from pymobiledevice3.lockdown import create_using_usbmux
-            from pymobiledevice3.services.diagnostics import DiagnosticsService
+    async def _execute(self) -> str:
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.services.diagnostics import DiagnosticsService
 
-            ld = create_using_usbmux(serial=self.udid)
-            diag = DiagnosticsService(ld)
+        lockdown = await create_using_usbmux(serial=self.udid)
 
+        if self.operation == "sync_time":
+            await lockdown.set_value(key="TimeIntervalSince1970",
+                                     value=int(time.time()))
+            return "Device time synchronized with host PC."
+
+        async with DiagnosticsService(lockdown) as diag:
             if self.operation == "restart":
-                diag.restart()
-                self.finished.emit(True, "Device restart command sent.")
-            elif self.operation == "shutdown":
-                diag.shutdown()
-                self.finished.emit(True, "Device shutdown command sent.")
-            elif self.operation == "sync_time":
-                ld.set_value(key="TimeIntervalSince1970", value=int(time.time()))
-                self.finished.emit(True, "Device time synchronized with host PC.")
-            else:
-                self.finished.emit(False, f"Unknown operation: {self.operation}")
+                await diag.restart()
+                return "Device restart command sent."
+            if self.operation == "shutdown":
+                await diag.shutdown()
+                return "Device shutdown command sent."
+        raise ValueError(f"Unknown operation: {self.operation}")
+
+    def run(self):
+        # pymobiledevice3 10.x is async throughout: create_using_usbmux,
+        # DiagnosticsService.restart/shutdown and set_value are all coroutine
+        # functions. Calling them without awaiting returned un-awaited
+        # coroutines, so this reported "restart command sent" while doing
+        # nothing at all. This QThread has no running loop, so asyncio.run is
+        # the correct bridge.
+        try:
+            self.finished.emit(True, asyncio.run(self._execute()))
         except Exception as e:
             self.finished.emit(False, str(e))
 
