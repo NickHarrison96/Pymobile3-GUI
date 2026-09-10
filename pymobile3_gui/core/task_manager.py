@@ -151,19 +151,30 @@ class TaskManager(QObject):
             if not task:
                 return
 
-            task.progress = min(max(0, pct), 100)
+            # A negative pct means "indeterminate, leave the bar alone". Callers
+            # emit it alongside status text far more often than they emit a real
+            # percentage, so clamping it to 0 would pin the bar at zero for the
+            # whole operation.
+            if pct >= 0:
+                task.progress = min(pct, 100)
+
             if step_name:
                 task.current_step = step_name
-                # Mark completed steps
-                found_current = False
-                for s in task.steps:
-                    if s.name == step_name:
-                        s.status = "running"
-                        found_current = True
-                    elif not found_current:
-                        s.status = "done"
-                    else:
-                        s.status = "pending"
+                # Only re-stage the checklist when the name is actually one of
+                # this task's declared steps. Free-form status text (e.g. a tqdm
+                # line) matches nothing, and must not mark every step done.
+                if any(s.name == step_name for s in task.steps):
+                    seen_current = False
+                    for s in task.steps:
+                        if s.name == step_name:
+                            s.status = "running"
+                            seen_current = True
+                        elif not seen_current:
+                            s.status = "done"
+                        else:
+                            s.status = "pending"
+                else:
+                    task.status_text = step_name
             if detail:
                 task.detail_text = detail
 

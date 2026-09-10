@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QScrollArea, QMessageBox, QDoubleSpinBox, QComboBox,
     QFileDialog, QProgressBar
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QCursor, QPixmap
 from pymobile3_gui.ui.theme import Colors
 from pymobile3_gui.core.backend.tunnel_manager import (
@@ -21,6 +21,13 @@ from pymobile3_gui.core.backend.tunnel_manager import (
 )
 from pymobile3_gui.core.backend.resource_manager import safe_run_command
 
+
+# iOS 17+ auto-mount fetches a personalized DDI from Apple before mounting.
+# Generous ceiling so a slow download is not misreported as a mount failure.
+DDI_MOUNT_TIMEOUT = 900
+
+# How often to re-check Developer Mode on the device.
+DEV_MODE_POLL_MS = 15000
 
 LOCATION_PRESETS = [
     ("San Francisco", 37.774929, -122.419416),
@@ -127,9 +134,13 @@ class DeveloperView(QWidget):
         self.gps_worker = None
         self.tunnel_worker = None
 
-        # Developer Mode polling timer
-        self._dev_mode_timer = None
-        self._start_dev_mode_polling()
+        # Developer Mode polling. The timer is created here but only runs while
+        # this page is the visible workspace — see showEvent/hideEvent. Each tick
+        # spawns a pymobiledevice3 subprocess, so polling a page nobody is
+        # looking at is pure cost.
+        self._dev_mode_timer = QTimer(self)
+        self._dev_mode_timer.setInterval(DEV_MODE_POLL_MS)
+        self._dev_mode_timer.timeout.connect(self._check_dev_mode_status)
 
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -386,11 +397,14 @@ class DeveloperView(QWidget):
             QMessageBox.critical(self, "Error", f"Failed: {out}")
 
     def _mount_ddi(self):
-        self._show_busy("Mounting Developer Disk Image...")
+        # On iOS 17+ auto-mount downloads a personalized DDI from Apple before it
+        # mounts anything, which routinely takes minutes on a slow link. The old
+        # 60s ceiling killed the download and reported it as a mount failure.
+        self._show_busy("Mounting Developer Disk Image (may download, please wait)...")
         def run():
             ok, out = safe_run_command(
                 [sys.executable, "-m", "pymobiledevice3", "mounter", "auto-mount"],
-                timeout=60
+                timeout=DDI_MOUNT_TIMEOUT
             )
             return ok, out
         self._run_async(run, self._on_ddi_done)
@@ -403,7 +417,7 @@ class DeveloperView(QWidget):
             def verify():
                 ok2, out2 = safe_run_command(
                     [sys.executable, "-m", "pymobiledevice3", "mounter", "list"],
-                    timeout=10
+                    timeout=30
                 )
                 return ok2, out2
             self._run_async(verify, self._on_ddi_verified)
@@ -411,11 +425,28 @@ class DeveloperView(QWidget):
             self._hide_busy()
             QMessageBox.critical(self, "Mount Failed", f"Error mounting DDI: {out}")
 
+    @staticmethod
+    def _parse_mounted_images(out: str) -> list | None:
+        """
+        `mounter list` prints a JSON array of mounted image signatures — an empty
+        array when nothing is mounted. Returns None when the output isn't JSON.
+        """
+        try:
+            parsed = json.loads(out)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, list) else None
+
     def _on_ddi_verified(self, result):
         ok, out = result
         self._hide_busy()
-        if ok and "Mounted" in out:
-            QMessageBox.information(self, "DDI Mounted", "Developer Disk Image mounted and verified.")
+        images = self._parse_mounted_images(out) if ok else None
+        if images:
+            QMessageBox.information(
+                self, "DDI Mounted",
+                f"Developer Disk Image mounted and verified "
+                f"({len(images)} image{'s' if len(images) != 1 else ''} mounted)."
+            )
         else:
             QMessageBox.warning(self, "Mount Uncertain", f"Mount command succeeded but verification unclear:\n{out}")
 
@@ -547,56 +578,63 @@ class DeveloperView(QWidget):
 
         worker = AsyncWorker(target_fn)
         worker.result.connect(callback)
-        worker.finished.connect(worker.deleteLater)
-        worker.start()
-        # Keep reference alive
+        # Hold a reference so the QThread is not collected mid-run, and drop it
+        # again on completion. Without the discard this list grew for the life of
+        # the window — one dead entry per poll tick.
         if not hasattr(self, '_async_workers'):
             self._async_workers = []
         self._async_workers.append(worker)
+        worker.finished.connect(lambda w=worker: self._retire_async_worker(w))
+        worker.start()
+
+    def _retire_async_worker(self, worker):
+        try:
+            self._async_workers.remove(worker)
+        except ValueError:
+            pass
+        worker.deleteLater()
 
     # -------------------------------------------------------------------------
     # Developer Mode polling
     # -------------------------------------------------------------------------
 
-    def _start_dev_mode_polling(self):
-        """Start periodic check of Developer Mode status."""
-        from PySide6.QtCore import QTimer
-        self._dev_mode_timer = QTimer(self)
-        self._dev_mode_timer.timeout.connect(self._check_dev_mode_status)
-        self._dev_mode_timer.start(5000)  # Check every 5 seconds
-        # Initial check
+    def showEvent(self, event):
+        """Poll only while this workspace is on screen."""
+        super().showEvent(event)
         self._check_dev_mode_status()
+        self._dev_mode_timer.start()
+
+    def hideEvent(self, event):
+        # closeEvent never fires for a page inside a QStackedWidget, so this is
+        # the hook that actually stops the polling when the user navigates away.
+        self._dev_mode_timer.stop()
+        super().hideEvent(event)
 
     def _check_dev_mode_status(self):
         """Check Developer Mode status on device and update UI."""
         def check():
-            from pymobile3_gui.core.backend.resource_manager import safe_run_command
-            import sys
-            ok, out = safe_run_command(
+            return safe_run_command(
                 [sys.executable, "-m", "pymobiledevice3", "amfi", "developer-mode-status"],
-                timeout=10
+                timeout=15
             )
-            return ok, out
 
         def on_result(result):
             ok, out = result
-            if ok and out:
-                # DeveloperModeStatus: 1 = enabled, 0 = disabled
-                enabled = "1" in out or "true" in out.lower()
-                if enabled:
-                    self.lbl_dev_mode_status.setText("Status: ✅ Enabled")
-                    self.lbl_dev_mode_status.setStyleSheet("font-size: 10px; color: #22c55e;")
-                else:
-                    self.lbl_dev_mode_status.setText("Status: ❌ Disabled (enable in Settings > Privacy & Security)")
-                    self.lbl_dev_mode_status.setStyleSheet("font-size: 10px; color: #ef4444;")
+            # `amfi developer-mode-status` prints a bare JSON boolean. Match it
+            # exactly rather than looking for a "1" substring, which any digit in
+            # an error string would satisfy.
+            if ok and out.strip().lower() == "true":
+                self.lbl_dev_mode_status.setText("Status: Enabled")
+                self.lbl_dev_mode_status.setStyleSheet(
+                    f"font-size: 10px; color: {Colors.SUCCESS};")
+            elif ok and out.strip().lower() == "false":
+                self.lbl_dev_mode_status.setText(
+                    "Status: Disabled (Settings > Privacy & Security)")
+                self.lbl_dev_mode_status.setStyleSheet(
+                    f"font-size: 10px; color: {Colors.DANGER};")
             else:
-                self.lbl_dev_mode_status.setText("Status: Unknown (device not connected?)")
-                self.lbl_dev_mode_status.setStyleSheet(f"font-size: 10px; color: {Colors.TEXT_MUTED};")
+                self.lbl_dev_mode_status.setText("Status: Unknown (no device?)")
+                self.lbl_dev_mode_status.setStyleSheet(
+                    f"font-size: 10px; color: {Colors.TEXT_MUTED};")
 
         self._run_async(check, on_result)
-
-    def closeEvent(self, event):
-        """Clean up timer on close."""
-        if self._dev_mode_timer:
-            self._dev_mode_timer.stop()
-        super().closeEvent(event)

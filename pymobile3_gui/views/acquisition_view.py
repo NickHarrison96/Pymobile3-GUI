@@ -15,7 +15,9 @@ from PySide6.QtGui import QCursor
 from pymobile3_gui.ui.theme import Colors
 from pymobile3_gui.core.task_manager import TaskManager
 from pymobile3_gui.core.backend.paths import backups_dir
-from pymobile3_gui.core.backend.backup_engine import AcquisitionWorker, ACQUISITION_MODES, DEFAULT_OPTIONS
+from pymobile3_gui.core.backend.backup_engine import (
+    AcquisitionWorker, ACQUISITION_MODES, DEFAULT_OPTIONS, plan_steps
+)
 
 
 class ModeSelectCard(QFrame):
@@ -254,13 +256,9 @@ class AcquisitionView(QWidget):
             "keep_intermediate": False,
         }
 
-        # Step list for the task manager
-        if self.selected_mode == "logical":
-            steps = ["Device Verification", "MobileBackup2 Creation", "Validation"]
-        elif self.selected_mode == "prfs":
-            steps = ["Device Verification", "File System Traversal", "Media & Crash Dump", "Archive Packaging"]
-        else:  # logical_plus
-            steps = ["Device Verification", "MobileBackup2 Creation", "Camera Media Dump", "Crash Reports", "TAR Packaging"]
+        # Built from the engine's own plan so every checklist entry matches a
+        # step the worker actually emits.
+        steps = plan_steps(self.selected_mode, opts)
 
         mode_name = ACQUISITION_MODES[self.selected_mode]["label"]
 
@@ -272,18 +270,25 @@ class AcquisitionView(QWidget):
                 options=opts
             )
 
-            # Bridge AcquisitionWorker signals to TaskManager callbacks
+            # Bridge AcquisitionWorker signals to TaskManager callbacks.
+            # status is per-line chatter and goes to `detail`; only step_changed
+            # advances the checklist. Routing status through `step` was what
+            # pinned the progress bar at 0% for the whole acquisition.
             def on_progress(p):
                 progress_cb(p)
 
             def on_status(s):
-                progress_cb(-1, step=s)
+                progress_cb(-1, detail=s)
+
+            def on_step(name):
+                progress_cb(-1, step=name)
 
             def on_output(line):
                 log_cb(line)
 
             self.worker.progress.connect(on_progress)
             self.worker.status.connect(on_status)
+            self.worker.step_changed.connect(on_step)
             self.worker.output.connect(on_output)
 
             self.worker.start()

@@ -69,6 +69,41 @@ DEFAULT_OPTIONS = {
     "keep_intermediate": False,
 }
 
+# Step names emitted via step_changed. The UI checklist is built from
+# plan_steps(), so these names are the single source of truth for both sides.
+STEP_BACKUP = "iTunes backup"
+STEP_MEDIA = "Camera media"
+STEP_CRASH = "Crash reports"
+STEP_APPS = "App inventory"
+STEP_ARCHIVE = "Archive"
+
+
+def plan_steps(mode: str, options: dict | None = None) -> list[str]:
+    """
+    The exact steps AcquisitionWorker will emit for this mode and options.
+
+    The view builds its checklist from this rather than hardcoding prose names,
+    so a checklist entry can never fail to match the step that drives it.
+    """
+    opts = {**DEFAULT_OPTIONS, **(options or {})}
+    if mode == "logical":
+        return [STEP_BACKUP]
+    if mode not in ("logical_plus", "prfs"):
+        return []
+
+    steps: list[str] = []
+    if mode == "logical_plus":
+        steps.append(STEP_BACKUP)
+    if opts["incl_media"]:
+        steps.append(STEP_MEDIA)
+    if opts["incl_crash"]:
+        steps.append(STEP_CRASH)
+    if opts["incl_apps"]:
+        steps.append(STEP_APPS)
+    if steps:
+        steps.append(STEP_ARCHIVE)
+    return steps
+
 
 class AcquisitionWorker(QThread):
     """
@@ -76,13 +111,18 @@ class AcquisitionWorker(QThread):
 
     Signals (matching StreamingProcessRunner so the progress panel can bind):
         progress(int)        0-100, -1 for indeterminate
-        status(str)          current step
+        status(str)          free-form status text for the current line
+        step_changed(str)    a real step boundary; the name is one of STEP_*
         output(str)          log line
         finished(bool, str)  (success, summary)
+
+    status fires for every line of tool output, so it must not be mistaken for a
+    step transition — a checklist driven by it would advance on tqdm noise.
     """
 
     progress = Signal(int)
     status = Signal(str)
+    step_changed = Signal(str)
     output = Signal(str)
     finished = Signal(bool, str)
 
@@ -150,6 +190,7 @@ class AcquisitionWorker(QThread):
 
     def _run_logical(self) -> tuple[bool, str]:
         self.output.emit("=== Logical acquisition (mobilebackup2) ===")
+        self.step_changed.emit(STEP_BACKUP)
         self.status.emit("Creating iTunes-style backup…")
         ok = self._stream(["backup2", "backup", "--full", self.output_dir],
                           step_label="Backup", base=0, span=100)
@@ -171,13 +212,13 @@ class AcquisitionWorker(QThread):
         # its slice of the overall bar.
         steps: list[tuple[str, callable]] = []
         if include_backup:
-            steps.append(("iTunes backup", lambda b, s: self._step_backup(stage_dir, b, s)))
+            steps.append((STEP_BACKUP, lambda b, s: self._step_backup(stage_dir, b, s)))
         if self.options["incl_media"]:
-            steps.append(("Camera media", lambda b, s: self._step_media(stage_dir, b, s)))
+            steps.append((STEP_MEDIA, lambda b, s: self._step_media(stage_dir, b, s)))
         if self.options["incl_crash"]:
-            steps.append(("Crash reports", lambda b, s: self._step_crash(stage_dir, b, s)))
+            steps.append((STEP_CRASH, lambda b, s: self._step_crash(stage_dir, b, s)))
         if self.options["incl_apps"]:
-            steps.append(("App inventory", lambda b, s: self._step_apps(stage_dir)))
+            steps.append((STEP_APPS, lambda b, s: self._step_apps(stage_dir)))
 
         if not steps:
             return False, "No acquisition components selected."
@@ -192,6 +233,7 @@ class AcquisitionWorker(QThread):
             if self._cancelled:
                 return False, "Cancelled."
             base = (index - 1) * span
+            self.step_changed.emit(label)
             self.status.emit(f"[{index}/{len(steps)}] {label}…")
             self.output.emit(f"\n[{index}/{len(steps)}] {label}")
             self.progress.emit(base)
@@ -210,6 +252,7 @@ class AcquisitionWorker(QThread):
             return False, "Cancelled."
 
         # Archive everything collected
+        self.step_changed.emit(STEP_ARCHIVE)
         self.status.emit("Creating archive…")
         self.progress.emit(92)
         archive_path = os.path.join(
