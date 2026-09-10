@@ -32,7 +32,7 @@ def is_admin() -> bool:
         return False
 
 
-def relaunch_as_admin() -> tuple[bool, str]:
+def relaunch_as_admin(extra_args: list[str] | None = None) -> tuple[bool, str]:
     """
     Relaunch Pymobile3-GUI elevated via UAC. The caller is expected to quit the
     current (unelevated) instance once this returns success — the two must
@@ -52,7 +52,10 @@ def relaunch_as_admin() -> tuple[bool, str]:
 
     script = os.path.abspath(sys.argv[0])
     workdir = os.path.dirname(script) or os.getcwd()
-    params = " ".join(f'"{arg}"' for arg in [script, *sys.argv[1:]])
+    # extra_args lets the caller mark the child (e.g. --no-elevate) so a failed
+    # elevation cannot spawn an endless chain of relaunches.
+    argv = [script, *sys.argv[1:], *(extra_args or [])]
+    params = " ".join(f'"{arg}"' for arg in argv)
 
     try:
         # ShellExecuteW with the "runas" verb is what raises the UAC prompt.

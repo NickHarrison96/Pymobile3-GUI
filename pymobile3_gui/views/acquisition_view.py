@@ -267,7 +267,8 @@ class AcquisitionView(QWidget):
             self.worker = AcquisitionWorker(
                 mode=self.selected_mode,
                 output_dir=out_dir,
-                options=opts
+                options=opts,
+                is_cancelled_cb=is_cancelled_cb,
             )
 
             # Bridge AcquisitionWorker signals to TaskManager callbacks.
@@ -286,20 +287,32 @@ class AcquisitionView(QWidget):
             def on_output(line):
                 log_cb(line)
 
+            outcome: dict = {}
+
+            def on_finished(ok, message):
+                outcome["ok"] = ok
+                outcome["message"] = message
+
             self.worker.progress.connect(on_progress)
             self.worker.status.connect(on_status)
             self.worker.step_changed.connect(on_step)
             self.worker.output.connect(on_output)
+            self.worker.finished.connect(on_finished)
 
-            self.worker.start()
-            while self.worker.isRunning():
-                if is_cancelled_cb():
-                    self.worker.cancel()
-                    break
-                self.worker.wait(100)
+            # Run inline on this TaskManager worker thread. Starting it as a
+            # nested QThread instead would queue its signals to this thread,
+            # which blocks without an event loop — so nothing would ever be
+            # delivered and the UI would sit at 0% for the whole acquisition.
+            self.worker.execute()
 
             if is_cancelled_cb():
                 raise Exception("Acquisition cancelled by user.")
+
+            # Surface the engine's own verdict; without this the dock reported
+            # "Completed successfully" even for a failed acquisition.
+            if not outcome.get("ok", False):
+                raise Exception(outcome.get("message") or "Acquisition failed.")
+            log_cb(outcome["message"])
 
         tm = TaskManager.instance()
         tm.start_task(

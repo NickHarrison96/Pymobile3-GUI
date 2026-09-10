@@ -26,7 +26,7 @@ import tarfile
 import time
 from datetime import datetime
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QObject, Signal
 
 from pymobile3_gui.core.backend.process_runner import format_duration
 
@@ -105,9 +105,19 @@ def plan_steps(mode: str, options: dict | None = None) -> list[str]:
     return steps
 
 
-class AcquisitionWorker(QThread):
+class AcquisitionWorker(QObject):
     """
     Runs a multi-step forensic acquisition.
+
+    Deliberately a QObject, not a QThread: TaskManager already runs worker_fn on
+    its own thread, and nesting a QThread inside that thread silently breaks
+    signal delivery. The inner QThread's signals are queued to the thread that
+    *owns* the object — the outer worker thread — which is blocked waiting and
+    runs no event loop, so the queued events are never dispatched and no
+    progress or log line ever reaches the UI.
+
+    Call execute() from whatever thread should do the work; emissions are then
+    direct calls and reach their callbacks immediately.
 
     Signals (matching StreamingProcessRunner so the progress panel can bind):
         progress(int)        0-100, -1 for indeterminate
@@ -127,12 +137,16 @@ class AcquisitionWorker(QThread):
     finished = Signal(bool, str)
 
     def __init__(self, mode: str, output_dir: str,
-                 options: dict | None = None, parent=None):
+                 options: dict | None = None, parent=None,
+                 is_cancelled_cb=None):
         super().__init__(parent)
         self.mode = mode
         self.output_dir = output_dir
         self.options = {**DEFAULT_OPTIONS, **(options or {})}
         self._cancelled = False
+        # Lets an owner (TaskManager) signal cancellation without holding a
+        # reference to this object.
+        self._is_cancelled_cb = is_cancelled_cb
         self._proc: subprocess.Popen | None = None
         self._started_at = 0.0
 
@@ -140,24 +154,38 @@ class AcquisitionWorker(QThread):
     # Control
     # -------------------------------------------------------------------------
 
-    def is_running(self) -> bool:
-        return self.isRunning()
-
     def cancel(self):
         """Request cancellation; the current step is terminated."""
         self._cancelled = True
         self.status.emit("Cancelling…")
+        self._kill_current_process()
+
+    def _kill_current_process(self):
         if self._proc and self._proc.poll() is None:
             try:
                 self._proc.terminate()
             except Exception:
                 pass
 
+    def _should_cancel(self) -> bool:
+        """
+        True once cancellation is requested from either side. Latches, so a
+        cancel observed mid-step still tears down the running subprocess.
+        """
+        if self._cancelled:
+            return True
+        if self._is_cancelled_cb and self._is_cancelled_cb():
+            self._cancelled = True
+            self._kill_current_process()
+            return True
+        return False
+
     # -------------------------------------------------------------------------
     # Entry point
     # -------------------------------------------------------------------------
 
-    def run(self):
+    def execute(self):
+        """Run the acquisition on the calling thread."""
         self._started_at = time.time()
         try:
             if self.mode == "ffs":
@@ -176,7 +204,7 @@ class AcquisitionWorker(QThread):
             else:
                 ok, message = False, f"Unknown acquisition mode: {self.mode}"
 
-            if self._cancelled:
+            if self._should_cancel():
                 self.finished.emit(False, f"Cancelled after {self._elapsed()}.")
                 return
             self.finished.emit(ok, message)
@@ -230,7 +258,7 @@ class AcquisitionWorker(QThread):
         span = 90 // len(steps)
 
         for index, (label, action) in enumerate(steps, start=1):
-            if self._cancelled:
+            if self._should_cancel():
                 return False, "Cancelled."
             base = (index - 1) * span
             self.step_changed.emit(label)
@@ -248,7 +276,7 @@ class AcquisitionWorker(QThread):
                 failed.append(label)
                 self.output.emit(f"  ! {label} error: {e}")
 
-        if self._cancelled:
+        if self._should_cancel():
             return False, "Cancelled."
 
         # Archive everything collected
@@ -354,7 +382,7 @@ class AcquisitionWorker(QThread):
         last_overall = -1
         assert self._proc.stdout is not None
         for line in self._proc.stdout:
-            if self._cancelled:
+            if self._should_cancel():
                 break
             # tqdm redraws with \r, so one read can carry several updates.
             for part in re.split(r"[\r\n]", line):

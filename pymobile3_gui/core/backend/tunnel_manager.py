@@ -51,6 +51,11 @@ RSD_REQUIRED_MAJOR = 17
 # Health check interval (seconds)
 HEALTH_CHECK_INTERVAL = 10
 
+# Failed probes tolerated before the tunnel is declared lost. At the interval
+# above this is ~30s of silence, which outlasts a device re-lock but is still
+# quick enough to be useful.
+TUNNEL_LOST_AFTER_FAILURES = 3
+
 logger = logging.getLogger(__name__)
 
 # Single implementation lives in pymobile3_gui/core/backend/elevation.py so the
@@ -89,11 +94,16 @@ class TunneldManager:
         env = tm.tunnel_env(udid)         # pass to safe_run_command(env=...)
     """
 
-    def __init__(self, log_callback=None):
+    def __init__(self, log_callback=None, on_lost=None):
         # Default to the module logger rather than a no-op: a swallowed
         # "tunnel died" line is the difference between a diagnosable failure
         # and a silent one.
         self._log = log_callback or logger.info
+        # Invoked (from the health-monitor thread) when the tunnel is judged
+        # down. The UI turns this into a toast offering to reconnect; we never
+        # restart on our own, because doing so would throw an unexpected UAC
+        # prompt at whoever happens to be at the machine.
+        self._on_lost = on_lost
         self._proc = None
         self._started_by_us = False
         self._elevated_pid: Optional[int] = None
@@ -104,6 +114,15 @@ class TunneldManager:
     def set_log_callback(self, log_callback) -> None:
         """Re-point tunnel diagnostics, e.g. into the Developer view console."""
         self._log = log_callback or logger.info
+
+    def set_lost_callback(self, on_lost) -> None:
+        """
+        Set the notifier invoked when the tunnel is judged down.
+
+        Called from the health-monitor thread, so a GUI consumer must marshal
+        to the main thread (emit a signal) rather than touch widgets directly.
+        """
+        self._on_lost = on_lost
 
     # -------------------------------------------------------------------------
     # State
@@ -367,14 +386,28 @@ class TunneldManager:
         Called from the health-monitor thread after each failed probe, with the
         number of consecutive failures so far (1 on the first).
 
-        Return True to keep monitoring (the tunnel may come back), False to stop
-        monitoring and mark the tunnel down.
+        Policy: never restart the tunnel unattended. Tolerate short blips —
+        tunneld goes quiet while re-enumerating a device that was just
+        re-locked — then hand the decision to the user via a notification.
+        Auto-restarting would re-run the elevated spawn path and could pop a UAC
+        prompt at an unattended machine, repeatedly if the tunnel is flapping.
 
-        TODO(nick): choose the recovery policy — see the notes in chat.
+        Returns True to keep monitoring, False to stop and mark the tunnel down.
         """
-        # Placeholder: tolerate two blips, then mark down. Preserves the old
-        # give-up behaviour without dying on a single transient failure.
-        return consecutive_failures < 3
+        if consecutive_failures < TUNNEL_LOST_AFTER_FAILURES:
+            return True
+
+        if self._on_lost:
+            try:
+                self._on_lost(
+                    f"The RSD tunnel stopped responding after "
+                    f"{consecutive_failures} checks. Developer services "
+                    "(DVT instruments, screenshots, location simulation) will "
+                    "fail until it is running again."
+                )
+            except Exception as e:
+                self._log(f"[tunnel] lost-notifier raised: {e}")
+        return False
 
     def stop(self) -> tuple[bool, str]:
         """Stop a tunneld we started. Elevated daemons need matching privileges."""
@@ -501,18 +534,22 @@ def _which(name: str) -> str | None:
 _manager: TunneldManager | None = None
 
 
-def get_tunnel_manager(log_callback=None) -> TunneldManager:
+def get_tunnel_manager(log_callback=None, on_lost=None) -> TunneldManager:
     """
     Process-wide TunneldManager so every dialog shares one daemon.
 
-    Pass log_callback once (e.g. from the Developer view) to route tunnel
-    diagnostics into the UI console; later calls may re-point it.
+    Pass log_callback once (e.g. from the main window) to route tunnel
+    diagnostics into the UI console, and on_lost to be notified when the tunnel
+    drops. Later calls may re-point either.
     """
     global _manager
     if _manager is None:
-        _manager = TunneldManager(log_callback=log_callback)
-    elif log_callback is not None:
-        _manager.set_log_callback(log_callback)
+        _manager = TunneldManager(log_callback=log_callback, on_lost=on_lost)
+    else:
+        if log_callback is not None:
+            _manager.set_log_callback(log_callback)
+        if on_lost is not None:
+            _manager.set_lost_callback(on_lost)
     return _manager
 
 
