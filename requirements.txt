@@ -3,7 +3,10 @@
 PySide6>=6.6.0
 
 # iOS device communication
-pymobiledevice3>=3.0.0
+# Pinned to the 10.x CLI surface this app is written against. The command names
+# drift between majors (e.g. `lockdown get-value DeveloperModeStatus` became
+# `amfi developer-mode-status`), and those breakages are silent at import time.
+pymobiledevice3>=10.0,<11
 
 # System utilities
 psutil>=5.9.0

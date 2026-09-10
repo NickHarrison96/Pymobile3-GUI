@@ -217,17 +217,17 @@ class FilesAppsView(QWidget):
         lbl_dcim_title.setStyleSheet("font-size: 15px; font-weight: 700; color: #fff;")
         dcim_layout.addWidget(lbl_dcim_title)
 
-        lbl_dcim_desc = QLabel("Instantly jump to /Media/DCIM to view, pull, and archive camera photos and video recordings.", self)
+        lbl_dcim_desc = QLabel("Instantly jump to /DCIM to view, pull, and archive camera photos and video recordings.", self)
         lbl_dcim_desc.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 12px;")
         dcim_layout.addWidget(lbl_dcim_desc)
 
-        btn_jump_dcim = QPushButton("🖼️ Open /Media/DCIM Directory", self)
+        btn_jump_dcim = QPushButton("🖼️ Open /DCIM Directory", self)
         btn_jump_dcim.setFixedWidth(220)
-        btn_jump_dcim.clicked.connect(lambda: (self.tabs.setCurrentIndex(0), self._load_directory("/Media/DCIM")))
+        btn_jump_dcim.clicked.connect(lambda: (self.tabs.setCurrentIndex(0), self._load_directory("/DCIM")))
         dcim_layout.addWidget(btn_jump_dcim)
         dcim_layout.addStretch()
 
-        self.tabs.addTab(dcim_widget, "🖼️ Camera Roll (DCIM)")
+        self.tabs.addTab(dcim_widget, "🖼️ Camera Roll (/DCIM)")
         layout.addWidget(self.tabs)
 
     def _load_directory(self, path: str):

@@ -134,3 +134,7 @@ class FileSystemManager:
         with open(local_path, "rb") as f:
             data = f.read()
         return self.write_file(remote_path, data)
+
+    # Aliases for backwards compatibility / external callers
+    pull_file = download_file
+    push_file = upload_file

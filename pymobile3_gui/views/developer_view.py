@@ -127,6 +127,10 @@ class DeveloperView(QWidget):
         self.gps_worker = None
         self.tunnel_worker = None
 
+        # Developer Mode polling timer
+        self._dev_mode_timer = None
+        self._start_dev_mode_polling()
+
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("background: transparent; border: none;")
@@ -172,10 +176,13 @@ class DeveloperView(QWidget):
         lbl_s1_t.setStyleSheet("font-size: 12px; font-weight: 700; color: #fff;")
         lbl_s1_d = QLabel("Enable AMFI developer mode on device", self)
         lbl_s1_d.setStyleSheet(f"font-size: 10px; color: {Colors.TEXT_SECONDARY};")
+        self.lbl_dev_mode_status = QLabel("Status: Checking...", self)
+        self.lbl_dev_mode_status.setStyleSheet(f"font-size: 10px; color: {Colors.TEXT_MUTED};")
         btn_s1 = QPushButton("Enable Dev Mode", self)
         btn_s1.clicked.connect(self._enable_dev_mode)
         box_step1.addWidget(lbl_s1_t)
         box_step1.addWidget(lbl_s1_d)
+        box_step1.addWidget(self.lbl_dev_mode_status)
         box_step1.addWidget(btn_s1)
         readiness_layout.addLayout(box_step1)
 
@@ -390,11 +397,27 @@ class DeveloperView(QWidget):
 
     def _on_ddi_done(self, result):
         ok, out = result
-        self._hide_busy()
         if ok:
-            QMessageBox.information(self, "DDI Mounted", "Developer Disk Image mounted successfully.")
+            # Verify mount by checking if DDI is actually mounted
+            self._show_busy("Verifying DDI mount...")
+            def verify():
+                ok2, out2 = safe_run_command(
+                    [sys.executable, "-m", "pymobiledevice3", "mounter", "list"],
+                    timeout=10
+                )
+                return ok2, out2
+            self._run_async(verify, self._on_ddi_verified)
         else:
+            self._hide_busy()
             QMessageBox.critical(self, "Mount Failed", f"Error mounting DDI: {out}")
+
+    def _on_ddi_verified(self, result):
+        ok, out = result
+        self._hide_busy()
+        if ok and "Mounted" in out:
+            QMessageBox.information(self, "DDI Mounted", "Developer Disk Image mounted and verified.")
+        else:
+            QMessageBox.warning(self, "Mount Uncertain", f"Mount command succeeded but verification unclear:\n{out}")
 
     def _toggle_tunnel(self):
         tm = get_tunnel_manager()
@@ -530,3 +553,50 @@ class DeveloperView(QWidget):
         if not hasattr(self, '_async_workers'):
             self._async_workers = []
         self._async_workers.append(worker)
+
+    # -------------------------------------------------------------------------
+    # Developer Mode polling
+    # -------------------------------------------------------------------------
+
+    def _start_dev_mode_polling(self):
+        """Start periodic check of Developer Mode status."""
+        from PySide6.QtCore import QTimer
+        self._dev_mode_timer = QTimer(self)
+        self._dev_mode_timer.timeout.connect(self._check_dev_mode_status)
+        self._dev_mode_timer.start(5000)  # Check every 5 seconds
+        # Initial check
+        self._check_dev_mode_status()
+
+    def _check_dev_mode_status(self):
+        """Check Developer Mode status on device and update UI."""
+        def check():
+            from pymobile3_gui.core.backend.resource_manager import safe_run_command
+            import sys
+            ok, out = safe_run_command(
+                [sys.executable, "-m", "pymobiledevice3", "amfi", "developer-mode-status"],
+                timeout=10
+            )
+            return ok, out
+
+        def on_result(result):
+            ok, out = result
+            if ok and out:
+                # DeveloperModeStatus: 1 = enabled, 0 = disabled
+                enabled = "1" in out or "true" in out.lower()
+                if enabled:
+                    self.lbl_dev_mode_status.setText("Status: ✅ Enabled")
+                    self.lbl_dev_mode_status.setStyleSheet("font-size: 10px; color: #22c55e;")
+                else:
+                    self.lbl_dev_mode_status.setText("Status: ❌ Disabled (enable in Settings > Privacy & Security)")
+                    self.lbl_dev_mode_status.setStyleSheet("font-size: 10px; color: #ef4444;")
+            else:
+                self.lbl_dev_mode_status.setText("Status: Unknown (device not connected?)")
+                self.lbl_dev_mode_status.setStyleSheet(f"font-size: 10px; color: {Colors.TEXT_MUTED};")
+
+        self._run_async(check, on_result)
+
+    def closeEvent(self, event):
+        """Clean up timer on close."""
+        if self._dev_mode_timer:
+            self._dev_mode_timer.stop()
+        super().closeEvent(event)

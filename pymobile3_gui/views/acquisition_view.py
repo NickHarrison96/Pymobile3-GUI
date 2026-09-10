@@ -268,9 +268,8 @@ class AcquisitionView(QWidget):
         def run_job(progress_cb, log_cb, is_cancelled_cb):
             self.worker = AcquisitionWorker(
                 mode=self.selected_mode,
-                dest_dir=out_dir,
-                options=opts,
-                udid=None
+                output_dir=out_dir,
+                options=opts
             )
 
             # Bridge AcquisitionWorker signals to TaskManager callbacks

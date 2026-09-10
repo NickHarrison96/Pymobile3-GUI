@@ -48,6 +48,14 @@ class Colors:
     TEXT_MUTED = "#6e7681"
     TEXT_INVERTED = "#0d1117"
 
+    # Sidebar navigation states. NAV_ACTIVE_TEXT / TEXT_SECONDARY are applied to
+    # the nav labels directly; every pair here clears WCAG AA (4.5:1) against its
+    # own background — see tests when changing these.
+    NAV_ACTIVE_BG = "#1e3a8a"
+    NAV_ACTIVE_BORDER = "#3b82f6"
+    NAV_ACTIVE_TEXT = "#ffffff"
+    NAV_HOVER_BG = "#171b26"
+
     # Traffic light buttons
     TRAFFIC_CLOSE = "#ff5f57"
     TRAFFIC_MIN = "#febc2e"

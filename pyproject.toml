@@ -12,7 +12,8 @@ license = {text = "MIT"}
 authors = [{name = "KushNick420"}]
 dependencies = [
     "PySide6>=6.6.0",
-    "pymobiledevice3>=3.0.0",
+    # Pinned to the 10.x CLI surface — command names drift between majors.
+    "pymobiledevice3>=10.0,<11",
     "psutil>=5.9.0",
     "nest-asyncio>=1.5.0",
 ]

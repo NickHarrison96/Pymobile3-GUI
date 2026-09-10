@@ -26,11 +26,15 @@ class NavButton(QPushButton):
         layout.setContentsMargins(12, 0, 12, 0)
         layout.setSpacing(10)
 
+        # Qt Style Sheets have no `inherit` keyword and a parent's `color` does not
+        # reach child widgets, so these labels carry no colour of their own — the
+        # active/hover state in _apply_style paints them explicitly. Declaring
+        # `color: inherit` here silently yields an invalid QColor, i.e. black text.
         self.lbl_icon = QLabel(icon, self)
-        self.lbl_icon.setStyleSheet("font-size: 14px; font-weight: 700; color: inherit;")
+        self.lbl_icon.setStyleSheet("font-size: 14px; font-weight: 700; background: transparent;")
 
         self.lbl_title = QLabel(title, self)
-        self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 600; color: inherit;")
+        self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 600; background: transparent;")
 
         layout.addWidget(self.lbl_icon)
         layout.addWidget(self.lbl_title)
@@ -48,38 +52,49 @@ class NavButton(QPushButton):
             """)
             layout.addWidget(self.lbl_count)
 
+        self._hovered = False
+        # Qt unchecks the previously active auto-exclusive button from C++, which
+        # never dispatches to a Python setChecked() override — `toggled` does fire
+        # for both that path and explicit setChecked() calls.
+        self.toggled.connect(self._apply_style)
         self._apply_style(False)
 
-    def setChecked(self, checked: bool):
-        super().setChecked(checked)
-        self._apply_style(checked)
+    def enterEvent(self, event):
+        self._hovered = True
+        self._apply_style(self.isChecked())
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._apply_style(self.isChecked())
+        super().leaveEvent(event)
 
     def _apply_style(self, active: bool):
         if active:
-            self.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: #1e3a8a;
-                    border: 1px solid #3b82f6;
-                    border-radius: 8px;
-                    color: #ffffff;
-                    text-align: left;
-                }}
-            """)
+            bg, border, fg = Colors.NAV_ACTIVE_BG, Colors.NAV_ACTIVE_BORDER, Colors.NAV_ACTIVE_TEXT
+        elif self._hovered:
+            bg, border, fg = Colors.NAV_HOVER_BG, Colors.BORDER_DEFAULT, Colors.TEXT_PRIMARY
         else:
-            self.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: transparent;
-                    border: 1px solid transparent;
-                    border-radius: 8px;
-                    color: {Colors.TEXT_SECONDARY};
-                    text-align: left;
-                }}
-                QPushButton:hover {{
-                    background-color: #171b26;
-                    border-color: {Colors.BORDER_DEFAULT};
-                    color: {Colors.TEXT_PRIMARY};
-                }}
-            """)
+            bg, border, fg = "transparent", "transparent", Colors.TEXT_SECONDARY
+
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 8px;
+                text-align: left;
+            }}
+        """)
+        # Child QLabels are not matched by the QPushButton selector above, so they
+        # must be recoloured directly or they fall back to black.
+        for lbl, size, weight in (
+            (self.lbl_icon, 14, 700),
+            (self.lbl_title, 12, 600),
+        ):
+            lbl.setStyleSheet(
+                f"font-size: {size}px; font-weight: {weight}; "
+                f"color: {fg}; background: transparent;"
+            )
 
 
 class DeviceStatusCard(QFrame):

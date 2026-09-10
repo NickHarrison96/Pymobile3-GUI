@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QStackedWidget, QSizePolicy
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QObject, Signal
 from PySide6.QtGui import QIcon, QFont
 
 from pymobile3_gui.ui.theme import get_application_stylesheet, Colors
@@ -23,6 +23,7 @@ from pymobile3_gui.ui.operation_dock import OperationDock
 from pymobile3_gui.ui.operation_drawer import OperationDrawer
 from pymobile3_gui.core.device_poller import DevicePoller
 from pymobile3_gui.core.task_manager import TaskManager
+from pymobile3_gui.core.backend.tunnel_manager import get_tunnel_manager
 
 from pymobile3_gui.views.device_view import DeviceView
 from pymobile3_gui.views.files_apps_view import FilesAppsView
@@ -44,6 +45,17 @@ def _set_windows_app_id():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
     except Exception:
         pass
+
+
+class LogBridge(QObject):
+    """
+    Thread-safe funnel for log lines produced off the GUI thread.
+
+    TunneldManager's health monitor runs in a plain Python thread; touching a
+    widget from there is undefined behaviour in Qt. Emitting a signal is safe
+    from any thread, and the queued connection delivers on the GUI thread.
+    """
+    message = Signal(str)
 
 
 class MainWindow(NativeFramelessWindow):
@@ -117,6 +129,12 @@ class MainWindow(NativeFramelessWindow):
         tm = TaskManager.instance()
         tm.task_progress.connect(self.operation_drawer.update_task)
         tm.task_log.connect(lambda tid, line: self.operation_drawer.append_log(line))
+
+        # Tunnel diagnostics into the same drawer, so a tunnel that dies mid-session
+        # says so instead of failing silently.
+        self.log_bridge = LogBridge(self)
+        self.log_bridge.message.connect(self.operation_drawer.append_log)
+        get_tunnel_manager(log_callback=self.log_bridge.message.emit)
 
         # Initial device poll after window is presented
         QTimer.singleShot(400, self._refresh_device)
