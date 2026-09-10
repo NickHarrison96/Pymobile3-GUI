@@ -17,6 +17,7 @@
 # handed straight to OperationProgressPanel.bind().
 # =============================================================================
 
+import asyncio
 import os
 import re
 import shutil
@@ -59,8 +60,22 @@ ACQUISITION_MODES = {
 
 # Matches tqdm-style "45%" / "45.2%" and "450/1000" item counters, so the
 # underlying tool's own progress can drive the overall bar.
+#
+# CAUTION: only valid when the tool reports ONE bar for the whole step. AFC pull
+# draws a fresh per-file bar (see _step_media), so parsing percentages there
+# makes the overall bar restart on every file.
 _PERCENT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
 _COUNT_RE = re.compile(r"\b(\d+)\s*/\s*(\d+)\b")
+
+# How often a progress_probe is consulted while streaming. The probe walks a
+# local directory, so it must not run on every tqdm redraw.
+PROBE_INTERVAL = 1.0
+
+# Time budget for the upfront AFC walk that yields an exact byte total.
+# Measured ~2.2 ms/entry, so a 6k-file camera roll lands around 13s; this
+# leaves generous headroom before we fall back to a plain file count. Cheap
+# next to the transfer it is measuring — 27 GB over USB takes many minutes.
+AFC_SCAN_BUDGET = 90.0
 
 DEFAULT_OPTIONS = {
     "incl_media": True,
@@ -76,6 +91,94 @@ STEP_MEDIA = "Camera media"
 STEP_CRASH = "Crash reports"
 STEP_APPS = "App inventory"
 STEP_ARCHIVE = "Archive"
+
+
+def _free_bytes(path: str) -> int:
+    """Free space on the volume holding path; 0 when it cannot be determined."""
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return 0
+
+
+def _gb(n: int) -> str:
+    return f"{n / (1024 ** 3):.1f} GB"
+
+
+def _local_dir_stats(path: str) -> tuple[int, int]:
+    """(file_count, total_bytes) already written locally. Cheap; purely local."""
+    count = 0
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            count += 1
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return count, total
+
+
+async def _afc_scan(remote_root: str, budget: float) -> tuple[int, int]:
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.afc import AfcService
+
+    lockdown = await create_using_usbmux()
+    async with AfcService(lockdown=lockdown) as afc:
+        # One stat per entry yields BOTH its type and its size, so a single
+        # walk suffices. Calling isdir() as well would double the round trips
+        # for no extra information — measured 26s vs 13s on a 6k-file roll.
+        started = time.time()
+        file_count = 0
+        total_bytes = 0
+        over_budget = False
+        pending = [remote_root]
+
+        while pending:
+            current = pending.pop()
+            try:
+                entries = await afc.listdir(current)
+            except Exception:
+                continue
+            for entry in entries:
+                if entry in (".", ".."):
+                    continue
+                full = f"{current}/{entry}"
+                try:
+                    info = await afc.stat(full)
+                except Exception:
+                    continue
+                if info.get("st_ifmt") == "S_IFDIR":
+                    pending.append(full)
+                    continue
+                file_count += 1
+                total_bytes += int(info.get("st_size", 0))
+                if time.time() - started > budget:
+                    over_budget = True
+            if over_budget:
+                break
+
+        # An abandoned walk leaves BOTH totals short — the count is as partial
+        # as the byte sum — so neither is a safe denominator. Report nothing and
+        # let the caller degrade to coarse progress rather than show a bar that
+        # races to 100% and sticks there.
+        if over_budget:
+            return 0, 0
+        return file_count, total_bytes
+
+
+def scan_remote_totals(remote_root: str,
+                       budget: float = AFC_SCAN_BUDGET) -> tuple[int, int]:
+    """
+    (file_count, total_bytes) under a remote AFC path; (0, 0) if unreachable.
+
+    total_bytes is 0 when the stat walk ran out of budget — callers should fall
+    back to the file count in that case.
+    """
+    try:
+        return asyncio.run(_afc_scan(remote_root, budget))
+    except Exception:
+        return 0, 0
 
 
 def plan_steps(mode: str, options: dict | None = None) -> list[str]:
@@ -286,6 +389,17 @@ class AcquisitionWorker(QObject):
         archive_path = os.path.join(
             self.output_dir, f"{mode_label.lower().rstrip('+')}_{timestamp}.tar"
         )
+
+        _staged_files, staged_bytes = _local_dir_stats(stage_dir)
+        free = _free_bytes(self.output_dir)
+        if free and staged_bytes and free < staged_bytes * 1.05:
+            return False, (
+                f"Collected {_gb(staged_bytes)} but only {_gb(free)} is free — "
+                f"archiving needs about that much again. The staged files are "
+                f"still at {stage_dir}; free some space and re-archive, or "
+                f"re-run with archiving disabled."
+            )
+
         try:
             with tarfile.open(archive_path, "w:") as tar:
                 tar.add(stage_dir, arcname=os.path.basename(stage_dir))
@@ -319,9 +433,48 @@ class AcquisitionWorker(QObject):
     def _step_media(self, stage_dir: str, base: int = 0, span: int = 0) -> bool:
         target = os.path.join(stage_dir, "media")
         os.makedirs(target, exist_ok=True)
+
+        # `afc pull` draws a NEW tqdm bar for every file over 4 MB, so its
+        # percentages describe one photo, not the camera roll. Feeding those to
+        # the overall bar made it sweep this step's slice once per file forever.
+        # Measure the destination directory against a known total instead.
+        self.status.emit("Scanning camera roll…")
+        file_count, total_bytes = scan_remote_totals("/DCIM")
+        if total_bytes:
+            self.output.emit(
+                f"  Camera roll: {file_count} files, {_gb(total_bytes)}")
+            # The collection is later tar'd from this staging directory, so the
+            # peak requirement is roughly twice what we are about to pull.
+            # Filling the disk mid-transfer leaves a corrupt half-acquisition
+            # and takes the whole machine down with it.
+            free = _free_bytes(stage_dir)
+            needed = int(total_bytes * 2.1)
+            if free and free < needed:
+                self.output.emit(
+                    f"  ! Not enough free space: {_gb(free)} available, "
+                    f"~{_gb(needed)} needed (the collection is archived to a "
+                    f".tar, which briefly doubles usage).")
+                self.status.emit("Insufficient disk space")
+                return False
+        elif file_count:
+            self.output.emit(
+                f"  Camera roll: {file_count} files "
+                "(size scan skipped; progress counts files)")
+        else:
+            self.output.emit("  Camera roll size unknown; progress will be coarse.")
+
+        def probe():
+            copied_files, copied_bytes = _local_dir_stats(target)
+            if total_bytes:
+                return copied_bytes * 100.0 / total_bytes
+            if file_count:
+                return copied_files * 100.0 / file_count
+            return None
+
         # AFC is rooted at /var/mobile/Media, so /DCIM is the camera roll.
         return self._stream(["afc", "pull", "/DCIM", target],
-                            step_label="Media", base=base, span=span)
+                            step_label="Media", base=base, span=span,
+                            progress_probe=probe if (total_bytes or file_count) else None)
 
     def _step_crash(self, stage_dir: str, base: int = 0, span: int = 0) -> bool:
         target = os.path.join(stage_dir, "crash_reports")
@@ -364,7 +517,8 @@ class AcquisitionWorker(QObject):
         return kwargs
 
     def _stream(self, args: list[str], step_label: str = "",
-                base: int | None = None, span: int | None = None) -> bool:
+                base: int | None = None, span: int | None = None,
+                progress_probe=None) -> bool:
         """
         Run a step, forwarding its output live. Deliberately has no timeout —
         a full acquisition can legitimately run for a long time.
@@ -372,6 +526,12 @@ class AcquisitionWorker(QObject):
         base/span map the tool's own 0-100% onto this step's slice of the
         overall bar. Without them the bar would sit at the step's starting
         value while the status text advanced, which reads as a stuck bar.
+
+        progress_probe overrides percentage parsing for tools that draw a bar
+        per file rather than one for the whole step: it is polled at most every
+        PROBE_INTERVAL seconds and returns the step's own 0-100 completion, or
+        None when it cannot tell. Progress is clamped monotonic either way, so
+        a step can never visibly run backwards.
         """
         try:
             self._proc = subprocess.Popen(self._base_cmd(args), **self._popen_kwargs())
@@ -380,6 +540,7 @@ class AcquisitionWorker(QObject):
             return False
 
         last_overall = -1
+        last_probe_at = 0.0
         assert self._proc.stdout is not None
         for line in self._proc.stdout:
             if self._should_cancel():
@@ -394,11 +555,22 @@ class AcquisitionWorker(QObject):
 
                 if base is None or span is None:
                     continue
-                pct = self._parse_percent(part)
+
+                if progress_probe is not None:
+                    now = time.time()
+                    if now - last_probe_at < PROBE_INTERVAL:
+                        continue
+                    last_probe_at = now
+                    pct = progress_probe()
+                else:
+                    pct = self._parse_percent(part)
+
                 if pct is None:
                     continue
-                overall = int(base + (span * pct / 100))
-                if overall != last_overall:
+                overall = int(base + (span * max(0.0, min(100.0, pct)) / 100))
+                # Monotonic within the step: a per-file bar restarting at 0 must
+                # never drag the overall bar backwards.
+                if overall > last_overall:
                     last_overall = overall
                     self.progress.emit(overall)
 
