@@ -1,11 +1,3 @@
----
-
-
-<img width="1920" height="1040" alt="asd" src="https://github.com/user-attachments/assets/666cd9dd-d229-4176-8178-755cfe724b8f" />
-
-
----
-# NOTICE!: Super Early Pre-Alpha Stage, Constantly being updated. 
 # Pymobile3-GUI
 
 **Standalone iOS forensic & developer toolkit** — extracted from RootForgeKit.
@@ -20,6 +12,7 @@ A native-feel PySide6 desktop application for Windows 10/11 with Mica/Acrylic ba
 - **Developer Tools** — Progressive readiness pipeline (Dev Mode → DDI → RSD Tunnel) + DVT instruments (Process Monitor, Screenshot, GPS Simulation)
 - **Recovery & Restore** — IPSW firmware flashing via `idevicerestore` + interactive Recovery/DFU hardware guides
 - **Live Syslog** — Streaming console with filtering, pause/resume, export
+- **SSH Ramdisk** *(in development)* — checkm8 ramdisk creation and boot for A7-A11 devices
 
 ## Requirements
 
@@ -31,11 +24,11 @@ A native-feel PySide6 desktop application for Windows 10/11 with Mica/Acrylic ba
 
 ```bash
 git clone <repo-url>
-cd pymobile3_gui
+cd Pymobile3-GUI
 python -m venv .venv
 .venv\Scripts\activate      # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-python main.py
+python -m pymobile3_gui.main
 ```
 
 ## Building Standalone Executable (Windows)
@@ -55,6 +48,7 @@ pymobile3_gui/
 ├── core/
 │   ├── device_poller.py       # Async usbmux/lockdown device discovery
 │   ├── task_manager.py        # Centralized long-running task orchestration
+│   ├── process_manager.py     # Single-instance enforcement + child process cleanup
 │   └── backend/
 │       ├── backup_engine.py   # Forensic acquisition (Logical/Logical+/PRFS)
 │       ├── tunnel_manager.py  # iOS 17+ RSD tunnel (tunneld lifecycle)
@@ -78,6 +72,15 @@ iOS 17+ moved all developer services (DVT instruments, proclist, screenshot, loc
 3. **Start Tunnel** — Launches `pymobiledevice3 remote tunneld` elevated
 
 When "Developer services" reads green, DVT tabs are functional.
+
+## SSH Ramdisk (checkm8 Devices)
+
+The SSH Ramdisk feature (in development on `feature/sshrd-ramdisk`) ports [SSHRD_Script](https://github.com/verygenericname/SSHRD_Script) into the GUI. It supports A7-A11 devices and provides:
+
+- Ramdisk creation from IPSW firmware
+- DFU pwn + boot via gaster/irecovery
+- SSH access to the device filesystem
+- SHSH blob dumping
 
 ## License
 

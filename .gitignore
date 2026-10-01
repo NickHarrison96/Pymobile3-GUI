@@ -8,13 +8,13 @@ __pycache__/
 venv/
 env/
 
-# PyInstaller build output — regenerate with:
-#   python -m PyInstaller pymobile3_gui.spec --noconfirm
+# PyInstaller build output
 build/
 dist/
 *.manifest
+*.spec.bak
 
-# Release archives (attach these to a GitHub Release, never commit them)
+# Release archives
 *.zip
 *.7z
 *.tar.gz
@@ -43,3 +43,11 @@ Desktop.ini
 # Runtime output
 *.log
 extracted_backups/
+sshramdisk/
+work/
+12rd/
+dumped.shsh2
+dump.raw
+
+# Tunnel / device state
+*.lock
