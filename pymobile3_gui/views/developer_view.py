@@ -5,13 +5,16 @@ and interactive DVT instruments (Process Manager, Live Screenshot, GPS Simulator
 """
 
 import os
+import re
 import sys
 import json
+import subprocess
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QGridLayout, QTableWidget, QTableWidgetItem, QHeaderView,
     QTabWidget, QScrollArea, QMessageBox, QDoubleSpinBox, QComboBox,
-    QFileDialog, QProgressBar
+    QFileDialog, QProgressBar, QMenu, QLineEdit, QPlainTextEdit,
+    QApplication
 )
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QCursor, QPixmap
@@ -26,6 +29,11 @@ from pymobile3_gui.core.backend.paths import pmd3_cmd
 # iOS 17+ auto-mount fetches a personalized DDI from Apple before mounting.
 # Generous ceiling so a slow download is not misreported as a mount failure.
 DDI_MOUNT_TIMEOUT = 900
+
+# `amfi enable-developer-mode` reboots the device, waits for it to reappear over
+# usbmux, then answers the post-restart confirmation prompt. Killing it mid-cycle
+# (a short timeout) leaves Developer Mode off despite the reboot.
+DEV_MODE_ENABLE_TIMEOUT = 240
 
 # How often to re-check Developer Mode on the device.
 DEV_MODE_POLL_MS = 15000
@@ -48,6 +56,13 @@ class DvtProcessWorker(QThread):
         ok, out = run_developer_command(["developer", "dvt", "proclist"], timeout=30)
         if not ok:
             self.error_signal.emit(f"Failed to fetch processes:\n{out}")
+            return
+        if not out.strip():
+            # rc=0 with no stdout is how a swallowed pymobiledevice3 failure
+            # looks here (stderr was not captured for this JSON command).
+            self.error_signal.emit(
+                "No process data returned.\n\nCheck that the DDI is mounted "
+                "and the RSD tunnel is running, then retry.")
             return
         try:
             data = json.loads(out)
@@ -110,6 +125,64 @@ class GpsWorker(QThread):
                 self.error_signal.emit(out)
 
 
+class DvtActionWorker(QThread):
+    """
+    One-shot developer command (launch, kill, sysmon, arbitration).
+
+    Runs with stderr captured and treats an ERROR line as failure —
+    pymobiledevice3 logs failures to stderr while exiting 0.
+    """
+    finished = Signal(bool, str)
+
+    def __init__(self, args: list[str], timeout: int = 30):
+        super().__init__()
+        self.args = args
+        self.timeout = timeout
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
+
+    def run(self):
+        ok, out = run_developer_command(
+            self.args, timeout=self.timeout, include_stderr=True)
+        out = self._strip_ansi(out)
+        error_lines = [ln.strip() for ln in out.splitlines()
+                       if re.search(r"\bERROR\b", ln)]
+        if ok and error_lines:
+            # Log lines are timestamp/host-prefixed; the message follows ERROR.
+            detail = "\n".join(ln.split("ERROR", 1)[-1].strip(" \t:|")
+                               for ln in error_lines)
+            self.finished.emit(False, detail)
+            return
+        self.finished.emit(ok, out)
+
+
+class MountLookupWorker(QThread):
+    """Second-opinion mount check: LookupImage answers what CopyDevices cannot."""
+    finished = Signal(bool, str)
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
+
+    def run(self):
+        ok, out = safe_run_command(
+            pmd3_cmd(["mounter", "lookup", "Personalized"]),
+            timeout=30,
+            include_stderr=True
+        )
+        out = self._strip_ansi(out)
+        if not ok:
+            self.finished.emit(False, out)
+        elif "is not mounted" in out.lower():
+            self.finished.emit(False, out)
+        elif out.strip():
+            self.finished.emit(True, out)
+        else:
+            self.finished.emit(False, "LookupImage returned no data.")
+
+
 class TunnelWorker(QThread):
     """Background worker for tunnel start/stop (blocking operations)."""
     finished = Signal(bool, str)
@@ -134,6 +207,14 @@ class DeveloperView(QWidget):
         self.screenshot_worker = None
         self.gps_worker = None
         self.tunnel_worker = None
+        self._action_workers: list[DvtActionWorker] = []
+        self._power_proc = None  # detached arbitration check-in; holds the assertion
+        self._all_procs: list[dict] = []  # last full proclist, for search filtering
+        self._bundle_index: dict[str, str] | None = None  # name -> bundle id cache
+        self._bundle_partial: dict[str, str] = {}
+        self._bundle_source_idx = 0
+        self._bundle_loading = False
+        self._pending_bundle_lookup: tuple | None = None
 
         # Developer Mode polling. The timer is created here but only runs while
         # this page is the visible workspace — see showEvent/hideEvent. Each tick
@@ -286,10 +367,38 @@ class DeveloperView(QWidget):
         proc_top.addWidget(btn_refresh_procs)
         proc_layout.addLayout(proc_top)
 
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+        filter_row.addWidget(QLabel("Search:", self))
+        self.input_proc_filter = QLineEdit(self)
+        self.input_proc_filter.setPlaceholderText(
+            "Filter by process name, app name, or PID…")
+        self.input_proc_filter.setClearButtonEnabled(True)
+        self.input_proc_filter.textChanged.connect(self._apply_proc_filter)
+        filter_row.addWidget(self.input_proc_filter, stretch=1)
+        proc_layout.addLayout(filter_row)
+
         self.proc_table = QTableWidget(0, 4, self)
         self.proc_table.setHorizontalHeaderLabels(["PID", "Process Name", "Application Name", "App?"])
         self.proc_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.proc_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.proc_table.customContextMenuRequested.connect(self._on_proc_context_menu)
         proc_layout.addWidget(self.proc_table)
+
+        launch_row = QHBoxLayout()
+        launch_row.setSpacing(8)
+        launch_row.addWidget(QLabel("Bundle ID:", self))
+        self.input_bundle = QLineEdit(self)
+        self.input_bundle.setPlaceholderText("e.g. com.apple.mobilesafari")
+        self.input_bundle.returnPressed.connect(self._launch_app)
+        self.input_bundle.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.input_bundle.customContextMenuRequested.connect(self._on_bundle_context_menu)
+        launch_row.addWidget(self.input_bundle, stretch=1)
+        btn_launch = QPushButton("🚀 Launch App", self)
+        btn_launch.clicked.connect(self._launch_app)
+        launch_row.addWidget(btn_launch)
+        proc_layout.addLayout(launch_row)
+
         self.tabs.addTab(proc_widget, "⚡ Process Monitor")
 
         # ── Tab B: Screenshot Capture ─────────────────────────────────
@@ -362,6 +471,78 @@ class DeveloperView(QWidget):
         gps_layout.addStretch()
 
         self.tabs.addTab(gps_widget, "📍 GPS Location Simulation")
+
+        # ── Tab D: System Monitor ────────────────────────────────────
+        sysmon_widget = QWidget()
+        sysmon_layout = QVBoxLayout(sysmon_widget)
+        sysmon_layout.setContentsMargins(8, 8, 8, 8)
+        sysmon_layout.setSpacing(10)
+
+        sysmon_top = QHBoxLayout()
+        self.lbl_sysmon_status = QLabel("Snapshot of device-wide stats via DVT sysmon.", self)
+        self.lbl_sysmon_status.setStyleSheet(f"font-size: 11px; color: {Colors.TEXT_SECONDARY};")
+        sysmon_top.addWidget(self.lbl_sysmon_status, stretch=1)
+        btn_sysmon = QPushButton("⟳ Refresh System Stats", self)
+        btn_sysmon.clicked.connect(self._fetch_sysmon)
+        sysmon_top.addWidget(btn_sysmon)
+        sysmon_layout.addLayout(sysmon_top)
+
+        self.sysmon_view = QPlainTextEdit(self)
+        self.sysmon_view.setReadOnly(True)
+        self.sysmon_view.setPlaceholderText("System statistics appear here…")
+        self.sysmon_view.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background-color: {Colors.BG_TERMINAL};
+                border: 1px solid {Colors.BORDER_DEFAULT};
+                border-radius: 8px;
+                padding: 8px;
+                font-family: 'JetBrains Mono', 'Consolas', monospace;
+                font-size: 11px;
+                color: {Colors.SUCCESS};
+            }}
+        """)
+        sysmon_layout.addWidget(self.sysmon_view)
+        self.tabs.addTab(sysmon_widget, "📈 System Monitor")
+
+        # ── Tab E: Power Assertion ───────────────────────────────────
+        power_widget = QWidget()
+        power_layout = QVBoxLayout(power_widget)
+        power_layout.setContentsMargins(14, 14, 14, 14)
+        power_layout.setSpacing(12)
+
+        lbl_power_d = QLabel(
+            "Checks in as the device owner via developer arbitration, marking it "
+            "'in-use'. The assertion holds only while the check-in process runs, "
+            "which keeps the device awake during long operations.", self)
+        lbl_power_d.setStyleSheet(f"font-size: 11px; color: {Colors.TEXT_SECONDARY};")
+        lbl_power_d.setWordWrap(True)
+        power_layout.addWidget(lbl_power_d)
+
+        owner_row = QHBoxLayout()
+        owner_row.addWidget(QLabel("Owner name:", self))
+        self.input_power_owner = QLineEdit("Pymobile3-GUI", self)
+        self.input_power_owner.setToolTip("Identifier reported to the device as the current owner.")
+        owner_row.addWidget(self.input_power_owner, stretch=1)
+        power_layout.addLayout(owner_row)
+
+        power_btns = QHBoxLayout()
+        self.btn_power_hold = QPushButton("⚡ Hold Assertion (Check-In)", self)
+        self.btn_power_hold.clicked.connect(self._start_power_assertion)
+        self.btn_power_release = QPushButton("⏹ Release (Check-Out)", self)
+        self.btn_power_release.clicked.connect(self._stop_power_assertion)
+        self.btn_power_release.setEnabled(False)
+        power_btns.addWidget(self.btn_power_hold)
+        power_btns.addWidget(self.btn_power_release)
+        power_btns.addStretch()
+        power_layout.addLayout(power_btns)
+
+        self.lbl_power_status = QLabel("No assertion held.", self)
+        self.lbl_power_status.setStyleSheet(f"font-size: 11px; color: {Colors.TEXT_MUTED};")
+        self.lbl_power_status.setWordWrap(True)
+        power_layout.addWidget(self.lbl_power_status)
+        power_layout.addStretch()
+        self.tabs.addTab(power_widget, "🔋 Power Assertion")
+
         layout.addWidget(self.tabs)
 
         layout.addStretch()
@@ -371,60 +552,112 @@ class DeveloperView(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(scroll)
 
-    def _show_busy(self, msg: str = "Working..."):
+    def _show_busy(self, msg: str = "Working...", label: QLabel | None = None):
         self.op_progress.setVisible(True)
-        self.lbl_proc_status.setText(msg)
+        (label or self.lbl_proc_status).setText(msg)
 
     def _hide_busy(self):
         self.op_progress.setVisible(False)
 
     def _enable_dev_mode(self):
-        self._show_busy("Enabling developer mode...")
+        self._show_busy("Enabling developer mode — the device reboots; "
+                        "keep it connected (can take a few minutes)...")
         def run():
             ok, out = safe_run_command(
                 pmd3_cmd(["amfi", "enable-developer-mode"]),
-                timeout=30
+                timeout=DEV_MODE_ENABLE_TIMEOUT,
+                include_stderr=True
             )
+            out = self._strip_ansi(out)
+            if "passcode" in out.lower():
+                # Programmatic enable is refused while a passcode is set. Make
+                # sure the manual toggle is visible in Settings either way.
+                safe_run_command(
+                    pmd3_cmd(["amfi", "reveal-developer-mode"]),
+                    timeout=30,
+                    include_stderr=True
+                )
             return ok, out
         self._run_async(run, self._on_dev_mode_done)
 
     def _on_dev_mode_done(self, result):
         ok, out = result
         self._hide_busy()
-        if ok:
+        # pymobiledevice3 logs failures to stderr and still exits 0 — check text,
+        # not the exit status.
+        error_line = next((ln for ln in out.splitlines() if re.search(r"\bERROR\b", ln)), "")
+        if ok and not error_line:
+            self._check_dev_mode_status()
             QMessageBox.information(self, "Developer Mode",
-                "Command sent. Device may prompt to reboot and confirm in Settings > Privacy & Security.")
+                "Enable completed — the device restarted and the confirmation was "
+                "answered automatically. Status updates below.")
+            return
+        detail = error_line.split("ERROR", 1)[-1].strip(" \t:|") if error_line else out
+        if "passcode" in detail.lower():
+            QMessageBox.warning(self, "Developer Mode",
+                "Developer Mode can't be enabled from here while the device has a passcode set.\n\n"
+                "Enable it manually instead:\n"
+                "1. On the device open Settings > Privacy & Security > Developer Mode\n"
+                "   (at the bottom of the list).\n"
+                "2. Turn it on, then reboot when prompted.\n"
+                "3. Confirm after the restart.\n\n"
+                "The option has been revealed in Settings if it wasn't visible before.")
+        elif detail.lower().startswith("command timed out"):
+            QMessageBox.warning(self, "Developer Mode",
+                "The enable cycle did not finish in time — if the device rebooted, "
+                "the post-restart confirmation may have been missed.\n\n"
+                "After the device is back, check the status below. If it still says "
+                "Disabled, tap the Developer Mode confirmation alert on the device "
+                "(or press Enable again).")
         else:
-            QMessageBox.critical(self, "Error", f"Failed: {out}")
+            QMessageBox.critical(self, "Developer Mode", detail)
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        return re.sub(r"\x1b\[[0-9;]*m", "", text or "")
 
     def _mount_ddi(self):
         # On iOS 17+ auto-mount downloads a personalized DDI from Apple before it
         # mounts anything, which routinely takes minutes on a slow link. The old
         # 60s ceiling killed the download and reported it as a mount failure.
+        # stderr must be captured: pymobiledevice3 reports mount failures there
+        # while still exiting 0, so exit status alone always looks successful.
         self._show_busy("Mounting Developer Disk Image (may download, please wait)...")
         def run():
             ok, out = safe_run_command(
                 pmd3_cmd(["mounter", "auto-mount"]),
-                timeout=DDI_MOUNT_TIMEOUT
+                timeout=DDI_MOUNT_TIMEOUT,
+                include_stderr=True
             )
-            return ok, out
+            return ok, self._strip_ansi(out)
         self._run_async(run, self._on_ddi_done)
 
     def _on_ddi_done(self, result):
         ok, out = result
-        if ok:
-            # Verify mount by checking if DDI is actually mounted
-            self._show_busy("Verifying DDI mount...")
-            def verify():
-                ok2, out2 = safe_run_command(
-                    pmd3_cmd(["mounter", "list"]),
-                    timeout=30
-                )
-                return ok2, out2
-            self._run_async(verify, self._on_ddi_verified)
-        else:
+        self._last_mount_output = out
+        if not ok:
             self._hide_busy()
             QMessageBox.critical(self, "Mount Failed", f"Error mounting DDI: {out}")
+            return
+        # Log lines carry a timestamp/host prefix, so match ERROR anywhere in the line.
+        error_line = next((ln for ln in out.splitlines() if re.search(r"\bERROR\b", ln)), "")
+        if error_line:
+            self._hide_busy()
+            detail = error_line.split("ERROR", 1)[-1].strip(" \t:|")
+            if "developer mode is disabled" in detail.lower():
+                detail += ("\n\nUse the 'Enable Developer Mode' button in this tab, "
+                           "reboot the device, then mount again.")
+            QMessageBox.critical(self, "Mount Failed", detail)
+            return
+        # Verify mount by checking if DDI is actually mounted
+        self._show_busy("Verifying DDI mount...")
+        def verify():
+            ok2, out2 = safe_run_command(
+                pmd3_cmd(["mounter", "list"]),
+                timeout=30
+            )
+            return ok2, out2
+        self._run_async(verify, self._on_ddi_verified)
 
     @staticmethod
     def _parse_mounted_images(out: str) -> list | None:
@@ -448,8 +681,36 @@ class DeveloperView(QWidget):
                 f"Developer Disk Image mounted and verified "
                 f"({len(images)} image{'s' if len(images) != 1 else ''} mounted)."
             )
+        elif images == []:
+            # Valid JSON, empty list: CopyDevices shows nothing. Ask LookupImage
+            # before deciding — it answers "mounted?" directly.
+            self._show_busy("Confirming mount via LookupImage...")
+            self.lookup_worker = MountLookupWorker()
+            self.lookup_worker.finished.connect(self._on_mount_lookup)
+            self.lookup_worker.start()
         else:
-            QMessageBox.warning(self, "Mount Uncertain", f"Mount command succeeded but verification unclear:\n{out}")
+            QMessageBox.warning(
+                self, "Mount Uncertain",
+                f"Mount command succeeded but verification output was not understood:\n{out}"
+            )
+
+    def _on_mount_lookup(self, mounted: bool, detail: str):
+        self._hide_busy()
+        if mounted:
+            QMessageBox.information(
+                self, "DDI Mounted",
+                "Developer Disk Image is mounted (confirmed via LookupImage)."
+            )
+            return
+        base = ("The device reports no mounted developer image."
+                if "not mounted" in detail.lower()
+                else "Could not confirm the mount.")
+        output = getattr(self, "_last_mount_output", "").strip()
+        QMessageBox.warning(
+            self, "Mount Uncertain",
+            f"{base}\n\n{detail}".strip()
+            + (f"\n\nauto-mount output:\n{output}" if output else "")
+        )
 
     def _toggle_tunnel(self):
         tm = get_tunnel_manager()
@@ -490,17 +751,425 @@ class DeveloperView(QWidget):
 
     def _on_procs_loaded(self, procs: list):
         self._hide_busy()
+        self._all_procs = procs
+        if self.input_proc_filter.text().strip():
+            # A filter is active — apply it to the fresh data instead of
+            # flooding the table with rows the user asked to hide.
+            self._apply_proc_filter(self.input_proc_filter.text())
+            return
+        self._populate_proc_table(procs)
+        self.lbl_proc_status.setText(f"Loaded {len(procs)} active processes.")
+
+    def _populate_proc_table(self, procs: list):
         self.proc_table.setRowCount(len(procs))
         for row, p in enumerate(procs):
             self.proc_table.setItem(row, 0, QTableWidgetItem(str(p.get("pid", ""))))
             self.proc_table.setItem(row, 1, QTableWidgetItem(str(p.get("name", ""))))
             self.proc_table.setItem(row, 2, QTableWidgetItem(str(p.get("realName", ""))))
             self.proc_table.setItem(row, 3, QTableWidgetItem(str(p.get("isApp", ""))))
-        self.lbl_proc_status.setText(f"Loaded {len(procs)} active processes.")
+
+    def _apply_proc_filter(self, text: str):
+        """Case-insensitive substring match across every displayed column."""
+        needle = text.strip().lower()
+        if not needle:
+            self._populate_proc_table(self._all_procs)
+            if self._all_procs:
+                self.lbl_proc_status.setText(
+                    f"Loaded {len(self._all_procs)} active processes.")
+            return
+        matches = [
+            p for p in self._all_procs
+            if needle in str(p.get("pid", "")).lower()
+            or needle in str(p.get("name", "")).lower()
+            or needle in str(p.get("realName", "")).lower()
+            or needle in str(p.get("isApp", "")).lower()
+        ]
+        self._populate_proc_table(matches)
+        self.lbl_proc_status.setText(
+            f"Showing {len(matches)} of {len(self._all_procs)} processes.")
+
+    def _on_bundle_context_menu(self, pos):
+        text = self.input_bundle.text().strip()
+        menu = QMenu(self)
+        act_copy = menu.addAction("Copy Bundle ID")
+        act_copy.setEnabled(bool(text))
+        act_paste = menu.addAction("Paste")
+        act_select = menu.addAction("Select All")
+        act_clear = menu.addAction("Clear")
+        act_clear.setEnabled(bool(self.input_bundle.text()))
+        chosen = menu.exec(self.input_bundle.mapToGlobal(pos))
+        if chosen is act_copy:
+            QApplication.clipboard().setText(text)
+            self.lbl_proc_status.setText(f"Copied {text}")
+        elif chosen is act_paste:
+            self.input_bundle.paste()
+        elif chosen is act_select:
+            self.input_bundle.selectAll()
+        elif chosen is act_clear:
+            self.input_bundle.clear()
 
     def _on_procs_error(self, err: str):
         self._hide_busy()
         self.lbl_proc_status.setText(f"Error: {err}")
+
+    # ------------------------------------------------------------------
+    # Process control (context menu kill, app launcher)
+    # ------------------------------------------------------------------
+
+    def _on_proc_context_menu(self, pos):
+        row = self.proc_table.rowAt(pos.y())
+        pid_item = self.proc_table.item(row, 0) if row >= 0 else None
+        if pid_item is None:
+            return
+        pid = pid_item.text()
+        name_item = self.proc_table.item(row, 1)
+        name = name_item.text() if name_item else pid
+        real_item = self.proc_table.item(row, 2)
+        real_name = real_item.text() if real_item else ""
+
+        menu = QMenu(self)
+        act_kill = menu.addAction(f"⛔ Kill {name} (PID {pid})")
+        menu.addSeparator()
+        act_bundle = menu.addAction("📋 Copy Bundle ID")
+        act_set = menu.addAction("▶ Use as Launch Target")
+        menu.addSeparator()
+        act_copy = menu.addAction("Copy PID")
+        chosen = menu.exec(self.proc_table.viewport().mapToGlobal(pos))
+        if chosen is act_bundle:
+            self._resolve_bundle_id(name, real_name, set_field=False)
+        elif chosen is act_set:
+            self._resolve_bundle_id(name, real_name, set_field=True)
+        elif chosen is act_copy:
+            QApplication.clipboard().setText(pid)
+            self.lbl_proc_status.setText(f"PID {pid} copied to clipboard.")
+        elif chosen is act_kill:
+            reply = QMessageBox.question(
+                self, "Kill Process",
+                f"Terminate {name} (PID {pid}) on the device?",
+                QMessageBox.Yes | QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+            self._run_action(
+                ["developer", "dvt", "kill", pid],
+                lambda ok, out, p=pid, n=name: self._on_kill_done(ok, out, p, n),
+                timeout=20,
+                busy_msg=f"Killing PID {pid}...")
+
+    # ------------------------------------------------------------------
+    # Bundle id resolution (proclist has no bundle ids; applist does)
+    # ------------------------------------------------------------------
+
+    # Neither source alone is complete: core-device list-apps has system
+    # apps (Calculator, Safari) but misses some third-party ones, while
+    # dvt applist has plugins/user apps but no stock system apps.
+    BUNDLE_SOURCES = (
+        (["developer", "core-device", "list-apps"], "_merge_core_device_apps"),
+        (["developer", "dvt", "applist"], "_merge_dvt_applist"),
+    )
+
+    def _resolve_bundle_id(self, name: str, real_name: str, set_field: bool):
+        if self._bundle_index is not None:
+            self._deliver_bundle_id(name, real_name, set_field)
+            return
+        # Latest request wins while sources load.
+        self._pending_bundle_lookup = (name, real_name, set_field)
+        if not self._bundle_loading:
+            self._bundle_loading = True
+            self._bundle_partial = {}
+            self._bundle_source_idx = 0
+            self._fetch_next_bundle_source()
+
+    def _fetch_next_bundle_source(self):
+        if self._bundle_source_idx >= len(self.BUNDLE_SOURCES):
+            self._finish_bundle_sources()
+            return
+        cmd, _ = self.BUNDLE_SOURCES[self._bundle_source_idx]
+        self._run_action(
+            cmd,
+            self._on_bundle_source_loaded,
+            timeout=60,
+            busy_msg="Loading installed apps to resolve bundle id...")
+
+    def _on_bundle_source_loaded(self, ok: bool, out: str):
+        self._hide_busy()
+        _, merger = self.BUNDLE_SOURCES[self._bundle_source_idx]
+        self._bundle_source_idx += 1
+        if ok:
+            try:
+                data = json.loads(out)
+            except (ValueError, TypeError):
+                data = None
+            if isinstance(data, list):
+                getattr(self, merger)(data)
+        # A failed source is skipped silently — the other one may still
+        # answer; total failure is handled in _finish_bundle_sources.
+        self._fetch_next_bundle_source()
+
+    def _finish_bundle_sources(self):
+        self._bundle_loading = False
+        pending, self._pending_bundle_lookup = self._pending_bundle_lookup, None
+        if not self._bundle_partial:
+            self._toast(False, "Could not load the app list from the device.")
+            return
+        self._bundle_index = self._bundle_partial
+        if pending:
+            self._deliver_bundle_id(*pending)
+
+    def _merge_core_device_apps(self, data: list):
+        for item in data:
+            bundle_id = str(item.get("bundleIdentifier") or "")
+            if not bundle_id:
+                continue
+            keys = (item.get("name"), bundle_id.rsplit(".", 1)[-1])
+            for key in keys:
+                if key:
+                    self._bundle_partial.setdefault(str(key).lower(), bundle_id)
+
+    def _merge_dvt_applist(self, data: list):
+        # Two passes so main .app entries register first and plugin .appex
+        # entries (same DisplayName, different bundle id) only fill gaps.
+        for want_apps in (True, False):
+            for item in data:
+                bundle_id = str(item.get("CFBundleIdentifier") or "")
+                path = str(item.get("BundlePath") or "")
+                if not bundle_id or (path.endswith(".app") != want_apps):
+                    continue
+                for key in (item.get("ExecutableName"), item.get("DisplayName")):
+                    if key:
+                        self._bundle_partial.setdefault(str(key).lower(), bundle_id)
+
+    def _deliver_bundle_id(self, name: str, real_name: str, set_field: bool):
+        index = self._bundle_index or {}
+        bundle_id = (index.get((name or "").lower())
+                     or index.get((real_name or "").lower()))
+        if not bundle_id:
+            self._toast(False, f"No bundle id found for '{name}'.")
+            return
+        if set_field:
+            self.input_bundle.setText(bundle_id)
+            self.input_bundle.setFocus()
+            self.input_bundle.selectAll()
+            self.lbl_proc_status.setText(f"Launch target set: {bundle_id}")
+            return
+        QApplication.clipboard().setText(bundle_id)
+        self._toast(True, f"Copied {bundle_id}")
+
+    def _on_kill_done(self, ok: bool, out: str, pid: str, name: str):
+        self._hide_busy()
+        if ok:
+            self._toast(True, f"Terminated {name} (PID {pid}).")
+            self._fetch_processes()
+        else:
+            QMessageBox.critical(self, "Kill Failed", out)
+
+    def _launch_app(self):
+        bundle = self.input_bundle.text().strip()
+        if not bundle:
+            QMessageBox.warning(self, "Bundle ID Required",
+                                "Enter an app bundle identifier, e.g. com.apple.mobilesafari.")
+            return
+        self._run_action(
+            ["developer", "dvt", "launch", bundle],
+            self._on_launch_done,
+            timeout=30,
+            busy_msg=f"Launching {bundle}...")
+
+    def _on_launch_done(self, ok: bool, out: str):
+        self._hide_busy()
+        if ok:
+            self._toast(True, out.strip() or "Process launched.")
+        else:
+            QMessageBox.critical(self, "Launch Failed", out)
+
+    def _run_action(self, args: list[str], on_done, timeout: int = 30,
+                    busy_msg: str = "Working...", label: QLabel | None = None):
+        """Run a one-shot DVT command on a worker; retire it when done."""
+        self._show_busy(busy_msg, label=label)
+        worker = DvtActionWorker(args, timeout=timeout)
+        worker.finished.connect(on_done)
+        worker.finished.connect(
+            lambda _ok, _out, w=worker: self._retire_action_worker(w))
+        self._action_workers.append(worker)
+        worker.start()
+
+    def _retire_action_worker(self, worker):
+        try:
+            self._action_workers.remove(worker)
+        except ValueError:
+            pass
+        worker.deleteLater()
+
+    def _toast(self, ok: bool, body: str):
+        window = self.window()
+        toast = getattr(window, "toast", None)
+        if toast is None:
+            (QMessageBox.information if ok else QMessageBox.critical)(
+                self, "Success!" if ok else "Failed", body)
+            return
+        toast.show_message(
+            title="Success!" if ok else "Failed",
+            body=body,
+            level="info" if ok else "error",
+            timeout_ms=5000,
+        )
+
+    # ------------------------------------------------------------------
+    # System monitor
+    # ------------------------------------------------------------------
+
+    def _fetch_sysmon(self):
+        self._run_action(
+            ["developer", "dvt", "sysmon", "system"],
+            self._on_sysmon_done,
+            timeout=40,
+            busy_msg="Sampling system stats...",
+            label=self.lbl_sysmon_status)
+
+    def _on_sysmon_done(self, ok: bool, out: str):
+        self._hide_busy()
+        if not ok:
+            self.lbl_sysmon_status.setText("Failed to sample.")
+            self.sysmon_view.setPlainText(out)
+            return
+        items: list[tuple[str, object]] = []
+        try:
+            data = json.loads(out)
+            if isinstance(data, dict):
+                items = [(str(k), v) for k, v in data.items()]
+        except (ValueError, TypeError):
+            pass
+        if not items:
+            # `sysmon system` prints plain `key: value` lines, not JSON.
+            for line in out.splitlines():
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    key = key.strip()
+                    if key:
+                        items.append((key, value.strip()))
+        if not items:
+            self.lbl_sysmon_status.setText("Sampled (raw output).")
+            self.sysmon_view.setPlainText(out)
+            return
+        items.sort(key=lambda kv: kv[0])
+        width = max(len(key) for key, _ in items)
+        self.sysmon_view.setPlainText(
+            "\n".join(f"{key:<{width}}  {value}" for key, value in items))
+        self.lbl_sysmon_status.setText(f"{len(items)} metric(s) sampled.")
+
+    # ------------------------------------------------------------------
+    # Power assertion (developer arbitration check-in)
+    # ------------------------------------------------------------------
+
+    def _start_power_assertion(self):
+        tm = get_tunnel_manager()
+        if not tm.is_running():
+            QMessageBox.warning(self, "Tunnel Required",
+                                "Power assertion is a developer service and needs "
+                                "an active RSD tunnel.")
+            return
+        env = tm.tunnel_env()
+        if not env:
+            QMessageBox.warning(self, "No Device",
+                                "The tunnel has no device yet — unlock the phone, "
+                                "then retry.")
+            return
+        hostname = self.input_power_owner.text().strip() or "Pymobile3-GUI"
+        cmd = pmd3_cmd(["developer", "arbitration", "check-in", hostname, "--force"])
+        run_env = {**os.environ, **env, "PYTHONUNBUFFERED": "1"}
+
+        def run():
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    # check-in ends in input(); an open pipe keeps the process —
+                    # and with it the assertion — alive. Close the pipe and the
+                    # device is released automatically.
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=run_env,
+                    creationflags=creationflags,
+                )
+            except Exception as e:
+                return False, str(e)
+            try:
+                proc.wait(timeout=2.5)
+            except subprocess.TimeoutExpired:
+                return True, proc  # still running — assertion held
+            err = (proc.stderr.read() if proc.stderr else "").strip()
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False, err or "Arbitration check-in exited immediately."
+
+        def on_result(result):
+            ok, payload = result
+            self._hide_busy()
+            if ok:
+                self._power_proc = payload
+                self.lbl_power_status.setText(
+                    f"Assertion held as '{hostname}' — device marked in-use.")
+                self.lbl_power_status.setStyleSheet(
+                    f"font-size: 11px; color: {Colors.SUCCESS};")
+                self.btn_power_hold.setEnabled(False)
+                self.btn_power_release.setEnabled(True)
+            else:
+                self.lbl_power_status.setText("Check-in failed.")
+                self.lbl_power_status.setStyleSheet(
+                    f"font-size: 11px; color: {Colors.DANGER};")
+                msg = str(payload)
+                # iOS 26 no longer exposes com.apple.dt.devicearbitration
+                # (verified: InvalidService / "Failed to start service").
+                if any(marker in msg for marker in
+                       ("Failed to start service", "InvalidService",
+                        "MessageNotSupported", "not supported")):
+                    msg = (
+                        "Device arbitration isn't available on this device's iOS "
+                        "version — Apple no longer exposes the "
+                        "'com.apple.dt.devicearbitration' service.\n\n"
+                        "This tab only works on older iOS versions. For long "
+                        "operations on this device, keep the screen on manually.")
+                QMessageBox.warning(self, "Power Assertion Failed", msg)
+
+        self._show_busy("Checking in as device owner...", label=self.lbl_power_status)
+        self._run_async(run, on_result)
+
+    def _stop_power_assertion(self):
+        proc, self._power_proc = self._power_proc, None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self._run_action(
+            ["developer", "arbitration", "check-out"],
+            self._on_checkout_done,
+            timeout=20,
+            busy_msg="Releasing assertion...",
+            label=self.lbl_power_status)
+
+    def _on_checkout_done(self, ok: bool, out: str):
+        self._hide_busy()
+        self.btn_power_hold.setEnabled(True)
+        self.btn_power_release.setEnabled(False)
+        if ok:
+            self.lbl_power_status.setText("Assertion released.")
+            self.lbl_power_status.setStyleSheet(
+                f"font-size: 11px; color: {Colors.TEXT_MUTED};")
+        else:
+            self.lbl_power_status.setText(
+                "Check-out failed — the local process is stopped, but the device "
+                "may still consider it in-use.")
+            self.lbl_power_status.setStyleSheet(
+                f"font-size: 11px; color: {Colors.DANGER};")
+            QMessageBox.warning(self, "Check-Out Failed", out)
 
     def _take_screenshot(self):
         self._show_busy("Capturing screenshot...")

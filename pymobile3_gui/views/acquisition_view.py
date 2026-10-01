@@ -186,10 +186,13 @@ class AcquisitionView(QWidget):
         self.chk_crash.setChecked(True)
         self.chk_apps = QCheckBox("Installed App Inventory", self)
         self.chk_apps.setChecked(True)
+        self.chk_keep = QCheckBox("Keep intermediate files (skip archiving)", self)
+        self.chk_keep.setChecked(False)
 
         opts_box.addWidget(self.chk_media)
         opts_box.addWidget(self.chk_crash)
         opts_box.addWidget(self.chk_apps)
+        opts_box.addWidget(self.chk_keep)
         opts_box.addStretch()
         layout.addLayout(opts_box)
 
@@ -253,7 +256,7 @@ class AcquisitionView(QWidget):
             "incl_media": self.chk_media.isChecked(),
             "incl_crash": self.chk_crash.isChecked(),
             "incl_apps": self.chk_apps.isChecked(),
-            "keep_intermediate": False,
+            "keep_intermediate": self.chk_keep.isChecked(),
         }
 
         # Built from the engine's own plan so every checklist entry matches a

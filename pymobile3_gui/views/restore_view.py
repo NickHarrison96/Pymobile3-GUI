@@ -231,13 +231,37 @@ class RestoreView(QWidget):
                 cmd.append("-e")
             cmd.append(path)
 
-            progress_cb(10, step="Initializing Restore", detail="Starting idevicerestore...")
+            progress_cb(5, step="Preparing Firmware", detail="Validating IPSW firmware...")
             log_cb(f"Executing: {' '.join(cmd)}")
 
             ok, out = safe_run_command(cmd, timeout=1200)
-            log_cb(out)
+
+            lines = out.splitlines()
+            total_lines = len(lines) if lines else 1
+
+            for i, line in enumerate(lines):
+                log_cb(line)
+                pct = int(10 + (i / max(total_lines, 1)) * 80)
+
+                lower = line.lower()
+                if "enter" in lower and "recovery" in lower:
+                    progress_cb(pct, step="Entering Restore Mode", detail=line.strip())
+                elif "flash" in lower or "restore" in lower and "filesystem" in lower:
+                    progress_cb(pct, step="Flashing Filesystem", detail=line.strip())
+                elif "kernel" in lower:
+                    progress_cb(pct, step="Flashing Kernel", detail=line.strip())
+                elif "done" in lower or "complete" in lower or "finished" in lower:
+                    progress_cb(100, step="Finalizing", detail=line.strip())
+                else:
+                    progress_cb(pct, detail=line.strip())
+
+                if is_cancelled_cb():
+                    raise Exception("Restore cancelled by user.")
+
             if not ok:
                 raise Exception(f"Restore failed:\n{out}")
+
+            progress_cb(100, step="Finalizing", detail="Restore completed successfully.")
 
         tm = TaskManager.instance()
         tm.start_task(

@@ -90,6 +90,55 @@ pymobile3_gui/
 - `NativeFramelessWindow` handles DWM glass, resize borders, and title bar drag via `nativeEvent`.
 - Single-instance enforcement via `process_manager.py`.
 
+## Learned Pitfalls
+
+### Emoji & console encoding (source of recurring errors)
+- **The Windows console is cp1252.** Printing emoji (or any non-cp1252 char) to
+  stdout/stderr raises `UnicodeEncodeError: 'charmap' codec can't encode
+  character ...`. This has caused multiple "mysterious" crashes that had nothing
+  to do with the code under test — e.g. a `print(tabText(i))` smoke test failed
+  only because a tab label was `🔥 Crash Reports`.
+- **Prevention:**
+  - Never `print()` emoji, device names, or other raw device/user strings to the
+    console — they may contain Unicode (device was named
+    `Built/Hacked by: NïćĦäřřïšøň`). Log via Qt signals/`Toast` instead, or open
+    files explicitly with `encoding='utf-8'`.
+  - When writing test/smoke scripts, avoid printing strings that may contain
+    emoji; print counts/booleans instead (`print('tabs:', n)`).
+  - If a subprocess output must be captured, decode with
+    `errors='replace'` or read bytes and open with `encoding='utf-8'`.
+  - Emoji **are fine** inside the GUI (tab labels, buttons) — Qt renders them
+    as long as the source file itself is saved UTF-8. The problem is only
+    console I/O.
+  - User-facing strings from the device must not be concatenated into
+    `print`/`traceback`/`subprocess` shell arguments without escaping.
+
+### pymobiledevice3 exit codes lie
+- **Many pymobiledevice3 commands exit 0 even on failure** — errors are logged
+  to stderr (`mounter auto-mount` with Developer Mode off returned `rc=0` with
+  `ERROR Developer Mode is disabled...` only on stderr). `safe_run_command`
+  discards stderr on success by default, so a failed command looked successful
+  and surfaced later as a confusing "verification unclear" dialog.
+- **Prevention:**
+  - Pass `include_stderr=True` to `safe_run_command` for commands whose
+    failures matter, and inspect the text — do not trust `ok` alone.
+  - Log lines are prefixed (`timestamp host pid LEVEL message`), so match
+    `\bERROR\b` anywhere in the line; `startswith("ERROR")` never fires.
+  - When verifying device state, prefer a second-opinion query
+    (e.g. `mounter lookup <type>`) over one command's silence.
+
+### Long-running device operations must not be killed mid-cycle
+- **`amfi enable-developer-mode` takes ~50s end-to-end** (ENABLE → device
+  reboots → usbmux reconnect → auto-confirm the post-restart prompt). The GUI
+  used `timeout=30`, so it always killed the command after the reboot but
+  before the confirmation — device rebooted, Developer Mode stayed off. Same
+  class of bug as the old 60s DDI-mount timeout.
+- **Prevention:** give lifecycle-aware timeouts, not round numbers:
+  `DEV_MODE_ENABLE_TIMEOUT = 240` and `DDI_MOUNT_TIMEOUT = 900` (both in
+  `views/developer_view.py`). When adding a command that triggers a reboot,
+  download, or mount, size the timeout for the whole cycle and say so in the
+  busy message.
+
 ## Active Development
 
 ### SSH Ramdisk Integration (branch: `feature/sshrd-ramdisk`)
@@ -101,12 +150,12 @@ pymobile3_gui/
 ## Known Gaps (from docs/TODO.md)
 
 These features exist in RootForgeKit but have not been ported yet:
-- Lockdown control panel (~970 lines) — device settings read/write
-- Crash reports explorer — browse/read/export crash logs
-- DVT instruments: kill/launch app, sysmon, power assertion
 - Backup restore-to-device (restore path, not just IPSW flashing)
-- `keep_intermediate` option exposure in acquisition UI
 - Frozen binary verification (PyInstaller build not yet tested end-to-end)
+
+Ported and verified: lockdown control panel, crash reports explorer, DVT
+instruments (kill/launch/sysmon/power assertion — the last is unavailable on
+iOS 26.5, which no longer exposes the arbitration service), `keep_intermediate`.
 
 ## Code Style
 

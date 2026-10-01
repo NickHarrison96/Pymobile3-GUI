@@ -5,12 +5,13 @@ and media manager with upload, download, and container inspection.
 """
 
 import os
+import re
 import sys
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit,
     QListWidget, QListWidgetItem, QLabel, QFileDialog, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QFrame,
-    QInputDialog
+    QInputDialog, QSplitter, QTextEdit
 )
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont, QCursor
@@ -18,6 +19,68 @@ from pymobile3_gui.ui.theme import Colors
 from pymobile3_gui.core.backend.file_system import FileSystemManager, AFCException
 from pymobile3_gui.core.backend.resource_manager import safe_run_command
 from pymobile3_gui.core.backend.paths import pmd3_cmd
+
+
+class CrashListWorker(QThread):
+    loaded = Signal(list)
+    error_signal = Signal(str)
+
+    def run(self):
+        ok, out = safe_run_command(pmd3_cmd(["crash", "ls"]), timeout=30)
+        if not ok:
+            self.error_signal.emit(f"Failed to list crash reports: {out}")
+            return
+        files = [line.strip() for line in out.splitlines() if line.strip()]
+        self.loaded.emit(files)
+
+
+class CrashViewWorker(QThread):
+    loaded = Signal(str, str)
+    error_signal = Signal(str)
+
+    def __init__(self, filename: str):
+        super().__init__()
+        self.filename = filename
+
+    def run(self):
+        ok, out = safe_run_command(pmd3_cmd(["crash", "parse", self.filename]), timeout=30)
+        if not ok:
+            self.error_signal.emit(f"Failed to parse crash: {out}")
+            return
+        clean = re.sub(r"\x1b\[[0-9;]*m", "", out)
+        self.loaded.emit(self.filename, clean)
+
+
+class CrashPullWorker(QThread):
+    finished = Signal(bool, str)
+
+    def __init__(self, output_dir: str, filename: str | None = None):
+        super().__init__()
+        self.output_dir = output_dir
+        self.filename = filename
+
+    def run(self):
+        args = ["crash", "pull", self.output_dir]
+        if self.filename:
+            args += ["--remote-file", self.filename]
+        ok, out = safe_run_command(pmd3_cmd(args), timeout=120)
+        self.finished.emit(ok, out if ok else f"Pull failed: {out}")
+
+
+class CrashFlushWorker(QThread):
+    finished = Signal(bool, str)
+
+    def run(self):
+        ok, out = safe_run_command(pmd3_cmd(["crash", "flush"]), timeout=30)
+        self.finished.emit(ok, "Crashes flushed" if ok else f"Flush failed: {out}")
+
+
+class CrashClearWorker(QThread):
+    finished = Signal(bool, str)
+
+    def run(self):
+        ok, out = safe_run_command(pmd3_cmd(["crash", "clear"]), timeout=30)
+        self.finished.emit(ok, "All crashes cleared" if ok else f"Clear failed: {out}")
 
 
 class IosFileLoadWorker(QThread):
@@ -84,6 +147,8 @@ class FilesAppsView(QWidget):
         self.current_path = "/"
         self.worker = None
         self.apps_worker = None
+        self.crash_list = []
+        self.crash_workers = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(32, 28, 32, 32)
@@ -229,6 +294,86 @@ class FilesAppsView(QWidget):
         dcim_layout.addStretch()
 
         self.tabs.addTab(dcim_widget, "🖼️ Camera Roll (/DCIM)")
+
+        # ── Tab 4: Crash Reports ─────────────────────────────────────
+        crash_widget = QWidget()
+        crash_layout = QVBoxLayout(crash_widget)
+        crash_layout.setContentsMargins(8, 8, 8, 8)
+        crash_layout.setSpacing(10)
+
+        # Controls
+        crash_controls = QHBoxLayout()
+        self.lbl_crash_status = QLabel("Click 'Load Crash Reports' to list them.", self)
+        self.lbl_crash_status.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 11px;")
+        crash_controls.addWidget(self.lbl_crash_status, stretch=1)
+
+        btn_crash_load = QPushButton("⟳ Load Crash Reports", self)
+        btn_crash_load.clicked.connect(self._load_crashes)
+        crash_controls.addWidget(btn_crash_load)
+
+        btn_crash_flush = QPushButton("Flush Pending", self)
+        btn_crash_flush.clicked.connect(self._flush_crashes)
+        crash_controls.addWidget(btn_crash_flush)
+
+        btn_crash_clear = QPushButton("🗑️ Clear All", self)
+        btn_crash_clear.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Colors.DANGER_BG};
+                color: {Colors.DANGER};
+                border: 1px solid {Colors.DANGER_BORDER};
+            }}
+            QPushButton:hover {{
+                background-color: #5c1515;
+                border-color: {Colors.DANGER};
+            }}
+        """)
+        btn_crash_clear.clicked.connect(self._clear_crashes)
+        crash_controls.addWidget(btn_crash_clear)
+        crash_layout.addLayout(crash_controls)
+
+        # Splitter: list + viewer
+        crash_splitter = QSplitter(Qt.Horizontal, self)
+
+        self.crash_list_widget = QListWidget(self)
+        self.crash_list_widget.itemDoubleClicked.connect(self._on_crash_selected)
+        crash_splitter.addWidget(self.crash_list_widget)
+
+        self.crash_viewer = QTextEdit(self)
+        self.crash_viewer.setReadOnly(True)
+        self.crash_viewer.setStyleSheet(f"""
+            QTextEdit {{
+                background-color: {Colors.BG_TERMINAL};
+                border: 1px solid {Colors.BORDER_DEFAULT};
+                border-radius: 8px;
+                padding: 8px;
+                font-family: 'JetBrains Mono', 'Consolas', monospace;
+                font-size: 11px;
+            }}
+        """)
+        self.crash_viewer.setPlaceholderText("Double-click a crash report to view it.")
+        crash_splitter.addWidget(self.crash_viewer)
+        crash_splitter.setStretchFactor(0, 1)
+        crash_splitter.setStretchFactor(1, 3)
+        crash_layout.addWidget(crash_splitter, stretch=1)
+
+        # Action bar
+        crash_actions = QHBoxLayout()
+        btn_crash_export = QPushButton("📄 Export Selected", self)
+        btn_crash_export.clicked.connect(self._export_crash)
+        crash_actions.addWidget(btn_crash_export)
+
+        btn_crash_pull = QPushButton("📥 Pull Selected to PC", self)
+        btn_crash_pull.clicked.connect(self._pull_crash)
+        crash_actions.addWidget(btn_crash_pull)
+
+        btn_crash_pull_all = QPushButton("📥 Pull All to PC", self)
+        btn_crash_pull_all.clicked.connect(self._pull_all_crashes)
+        crash_actions.addWidget(btn_crash_pull_all)
+        crash_actions.addStretch()
+        crash_layout.addLayout(crash_actions)
+
+        self.tabs.addTab(crash_widget, "🔥 Crash Reports")
+
         layout.addWidget(self.tabs)
 
     def _load_directory(self, path: str):
@@ -341,3 +486,139 @@ class FilesAppsView(QWidget):
             self.apps_table.setItem(row, 3, QTableWidgetItem(str(app.get("type", ""))))
             self.apps_table.setItem(row, 4, QTableWidgetItem(str(app.get("container", ""))))
         self.lbl_apps_status.setText(f"Loaded {len(apps)} installed packages.")
+
+    # ── Crash Reports ────────────────────────────────────────────────
+
+    def _toast(self, ok: bool, body: str):
+        window = self.window()
+        toast = getattr(window, "toast", None)
+        if toast is None:
+            (QMessageBox.information if ok else QMessageBox.critical)(
+                self, "Success!" if ok else "Failed", body)
+            return
+        toast.show_message(
+            title="Success!" if ok else "Failed",
+            body=body,
+            level="info" if ok else "error",
+            timeout_ms=5000,
+        )
+
+    def _track_worker(self, worker: QThread):
+        self.crash_workers.append(worker)
+        worker.finished.connect(lambda: self.crash_workers.remove(worker) if worker in self.crash_workers else None)
+        worker.start()
+
+    def _load_crashes(self):
+        self.lbl_crash_status.setText("Loading crash reports...")
+        self.crash_list_widget.clear()
+        self.crash_viewer.clear()
+        worker = CrashListWorker()
+        worker.loaded.connect(self._on_crashes_loaded)
+        worker.error_signal.connect(lambda e: self.lbl_crash_status.setText(f"Error: {e}"))
+        self._track_worker(worker)
+
+    def _on_crashes_loaded(self, files: list):
+        self.crash_list = files
+        for f in files:
+            item = QListWidgetItem(f"📄 {f}")
+            item.setData(Qt.UserRole, f)
+            self.crash_list_widget.addItem(item)
+        self.lbl_crash_status.setText(f"Found {len(files)} crash reports")
+
+    def _on_crash_selected(self, item: QListWidgetItem):
+        filename = item.data(Qt.UserRole)
+        if not filename:
+            return
+        self.lbl_crash_status.setText(f"Parsing {filename}...")
+        worker = CrashViewWorker(filename)
+        worker.loaded.connect(self._on_crash_viewed)
+        worker.error_signal.connect(lambda e: self.lbl_crash_status.setText(f"Error: {e}"))
+        self._track_worker(worker)
+
+    def _on_crash_viewed(self, filename: str, content: str):
+        self.crash_viewer.setPlainText(content)
+        self.lbl_crash_status.setText(f"Viewing {filename}")
+
+    def _export_crash(self):
+        item = self.crash_list_widget.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Selection Required", "Select a crash report first.")
+            return
+        filename = item.data(Qt.UserRole)
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Export Crash Report",
+            filename.replace("/", "_"),
+            "Crash Reports (*.ips);;All Files (*)"
+        )
+        if not dest:
+            return
+        try:
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(self.crash_viewer.toPlainText())
+            self._toast(True, f"Saved to:\n{dest}")
+        except Exception as e:
+            self._toast(False, str(e))
+
+    def _pull_crash(self):
+        item = self.crash_list_widget.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Selection Required", "Select a crash report first.")
+            return
+        filename = item.data(Qt.UserRole)
+        dest_dir = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
+        if not dest_dir:
+            return
+        self.lbl_crash_status.setText(f"Pulling {filename}...")
+        worker = CrashPullWorker(dest_dir, filename)
+        worker.finished.connect(self._on_crash_pulled)
+        self._track_worker(worker)
+
+    def _pull_all_crashes(self):
+        if not self.crash_list:
+            QMessageBox.warning(self, "No Reports", "Load crash reports first.")
+            return
+        dest_dir = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
+        if not dest_dir:
+            return
+        self.lbl_crash_status.setText("Pulling all crash reports...")
+        worker = CrashPullWorker(dest_dir)
+        worker.finished.connect(self._on_crash_pulled)
+        self._track_worker(worker)
+
+    def _on_crash_pulled(self, ok: bool, msg: str):
+        self.lbl_crash_status.setText(msg)
+        self._toast(ok, msg)
+
+    def _flush_crashes(self):
+        reply = QMessageBox.question(
+            self, "Flush Pending",
+            "Flush pending crashes to CrashReports directory?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        worker = CrashFlushWorker()
+        worker.finished.connect(self._on_flush_done)
+        self._track_worker(worker)
+
+    def _on_flush_done(self, ok: bool, msg: str):
+        self._toast(ok, msg)
+        if ok:
+            self._load_crashes()
+
+    def _clear_crashes(self):
+        reply = QMessageBox.warning(
+            self, "Clear All Crashes",
+            "This will permanently delete ALL crash reports from the device.\n\nAre you sure?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        worker = CrashClearWorker()
+        worker.finished.connect(self._on_clear_done)
+        self._track_worker(worker)
+
+    def _on_clear_done(self, ok: bool, msg: str):
+        self._toast(ok, msg)
+        if ok:
+            self._load_crashes()

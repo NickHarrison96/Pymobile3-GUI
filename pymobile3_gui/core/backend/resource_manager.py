@@ -46,7 +46,8 @@ def configure_global_thread_pool() -> int:
 
 
 def safe_run_command(cmd: list[str], timeout: int = 10,
-                     env: dict | None = None) -> tuple[bool, str]:
+                     env: dict | None = None,
+                     include_stderr: bool = False) -> tuple[bool, str]:
     """
     Executes CLI processes with strict timeout and exception handling
     to ensure worker threads never hang indefinitely.
@@ -55,6 +56,9 @@ def safe_run_command(cmd: list[str], timeout: int = 10,
     Args:
         env: Optional environment overrides merged onto the current environment.
              Used to inject PYMOBILEDEVICE3_TUNNEL for iOS 17+ developer commands.
+        include_stderr: Append stderr to the returned text on success. pymobiledevice3
+             logs failures (e.g. "Developer Mode is disabled") to stderr while still
+             exiting 0, so without this a failed command looks successful.
     """
     try:
         startupinfo = None
@@ -85,7 +89,11 @@ def safe_run_command(cmd: list[str], timeout: int = 10,
             check=False
         )
         if res.returncode == 0:
-            return True, (res.stdout or "").strip()
+            out = (res.stdout or "").strip()
+            if include_stderr:
+                err = (res.stderr or "").strip()
+                out = f"{out}\n{err}".strip() if out else err
+            return True, out
         else:
             err = (res.stderr or "").strip() or f"Process exited with code {res.returncode}"
             return False, err
