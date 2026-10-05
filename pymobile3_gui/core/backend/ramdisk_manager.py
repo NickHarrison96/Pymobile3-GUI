@@ -232,6 +232,16 @@ def run_streaming(
         proc.kill()
         proc.wait()
         raise RamdiskError(f"{context or cmd[0]} timed out after {timeout}s")
+    except RamdiskError:
+        # Cancellation raises out of _stream_output with no finally on the
+        # Popen, so the child keeps running (a half-downloaded IPSW would keep
+        # writing while the next op deletes the work dir). Kill it before
+        # re-raising.
+        try:
+            proc.kill()
+        finally:
+            proc.wait()
+        raise
     if rc != 0 and not allow_failure:
         raise RamdiskError(
             f"{context or os.path.basename(cmd[0])} failed (exit code {rc}).")
@@ -417,18 +427,23 @@ def usb_reset(log_cb: LogCb) -> None:
     if backend:
         kwargs["backend"] = backend
     dev = None
-    for product in (0x1227, None):
+    # Try the known checkm8-era DFU product ids first, then fall back to ANY
+    # Apple device — but never drop the vendor filter: resetting an arbitrary
+    # non-Apple USB device (a user's mouse/keyboard/hub) would be catastrophic.
+    for product in (0x1227, 0x1222, 0x1228):
         kw = dict(kwargs)
-        if product is None:
-            kw.pop("idVendor")
-        else:
-            kw["idProduct"] = product
+        kw["idProduct"] = product
         try:
             dev = usb.core.find(**kw)
         except usb.core.USBError as e:
             raise RamdiskError(f"USB reset failed: {e}")
         if dev is not None:
             break
+    if dev is None:
+        try:
+            dev = usb.core.find(**kwargs)
+        except usb.core.USBError as e:
+            raise RamdiskError(f"USB reset failed: {e}")
     if dev is None:
         raise RamdiskError(
             "USB reset failed: no Apple USB device visible. If gaster pwn "

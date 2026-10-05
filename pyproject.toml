@@ -16,6 +16,11 @@ dependencies = [
     "pymobiledevice3>=10.0,<11",
     "psutil>=5.9.0",
     "nest-asyncio>=1.5.0",
+    # SSH ramdisk: paramiko (SSH console / blob dump) and requests (ipsw.me
+    # lookup). pymobiledevice3 satisfies neither, so they must be explicit or
+    # `pip install .` ships a build whose ramdisk tab fails at import time.
+    "paramiko>=3.0",
+    "requests>=2.28",
 ]
 
 [project.optional-dependencies]

@@ -7,6 +7,7 @@ tool (build / boot / erase / dump) for A7-A11 and T2 devices.
 
 import os
 import json
+import subprocess
 import threading
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -127,11 +128,11 @@ class RestoreView(QWidget):
         fc_layout.addWidget(self.chk_erase)
         ipsw_layout.addWidget(file_card)
 
-        btn_flash = QPushButton("⚡ Begin IPSW Firmware Restore", self)
-        btn_flash.setCursor(QCursor(Qt.PointingHandCursor))
-        btn_flash.setStyleSheet(primary_btn_qss)
-        btn_flash.clicked.connect(self._start_ipsw_restore)
-        ipsw_layout.addWidget(btn_flash)
+        self.btn_flash = QPushButton("⚡ Begin IPSW Firmware Restore", self)
+        self.btn_flash.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_flash.setStyleSheet(primary_btn_qss)
+        self.btn_flash.clicked.connect(self._start_ipsw_restore)
+        ipsw_layout.addWidget(self.btn_flash)
         ipsw_layout.addStretch()
 
         self.tabs.addTab(ipsw_tab, "⚡ IPSW Restore")
@@ -196,11 +197,11 @@ class RestoreView(QWidget):
         lbl_bk_warn.setStyleSheet(f"font-size: 12px; color: #fca5a5;")
         backup_layout.addWidget(lbl_bk_warn)
 
-        btn_backup_restore = QPushButton("⚡ Begin Backup Restore", self)
-        btn_backup_restore.setCursor(QCursor(Qt.PointingHandCursor))
-        btn_backup_restore.setStyleSheet(primary_btn_qss)
-        btn_backup_restore.clicked.connect(self._start_backup_restore)
-        backup_layout.addWidget(btn_backup_restore)
+        self.btn_backup_restore = QPushButton("⚡ Begin Backup Restore", self)
+        self.btn_backup_restore.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_backup_restore.setStyleSheet(primary_btn_qss)
+        self.btn_backup_restore.clicked.connect(self._start_backup_restore)
+        backup_layout.addWidget(self.btn_backup_restore)
         backup_layout.addStretch()
 
         self.tabs.addTab(backup_tab, "📤 Backup Restore")
@@ -430,10 +431,18 @@ class RestoreView(QWidget):
         self._dfu_timer.timeout.connect(self._poll_dfu)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
+        # Single-shot watchdog for the DFU probe: a QProcess that fails to start
+        # (or hangs on a wedged WinUSB driver) never emits `finished`, so without
+        # this _ram_probe_running would latch True and freeze the whole tab.
+        self._dfu_probe_timeout = QTimer(self)
+        self._dfu_probe_timeout.setSingleShot(True)
+        self._dfu_probe_timeout.setInterval(8000)
+        self._dfu_probe_timeout.timeout.connect(self._on_dfu_probe_timeout)
+
         tm = TaskManager.instance()
         tm.task_started.connect(self._on_ram_task_started)
         tm.task_finished.connect(self._on_ram_task_finished)
-
+        tm.task_finished.connect(self._on_restore_task_finished)
         self._ram_versions_ready.connect(self._on_ram_versions_ready)
         self._ram_wsl_ready.connect(self._on_ram_wsl_ready)
         threading.Thread(target=self._ram_probe_wsl, daemon=True).start()
@@ -585,8 +594,14 @@ class RestoreView(QWidget):
             progress_cb(100, step="Finalizing", detail="Restore completed.")
 
         tm = TaskManager.instance()
+        task_id = "backup_restore_" + str(os.getpid())
+        if tm.is_task_running(task_id):
+            QMessageBox.information(
+                self, "Busy", "A backup restore is already running.")
+            return
+        self.btn_backup_restore.setEnabled(False)
         tm.start_task(
-            task_id="backup_restore_" + str(os.getpid()),
+            task_id=task_id,
             title="Backup Restore",
             subtitle=folder,
             steps=["Validating Backup", "Connecting to Device", "Restoring Backup", "Finalizing"],
@@ -622,38 +637,66 @@ class RestoreView(QWidget):
             progress_cb(5, step="Preparing Firmware", detail="Validating IPSW firmware...")
             log_cb(f"Executing: {' '.join(cmd)}")
 
-            ok, out = safe_run_command(cmd, timeout=1200)
+            # Stream live so Cancel is honoured during the (potentially ~20 min)
+            # flash instead of only after a single 1200s subprocess.run returns.
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace", bufsize=1,
+                    creationflags=creationflags,
+                )
+            except OSError as e:
+                raise Exception(f"Could not start idevicerestore: {e}")
 
-            lines = out.splitlines()
-            total_lines = len(lines) if lines else 1
+            cancelled = False
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if is_cancelled_cb and is_cancelled_cb():
+                    cancelled = True
+                    proc.terminate()
+                    break
+                for part in line.replace("\r", "\n").split("\n"):
+                    part = part.rstrip()
+                    if not part:
+                        continue
+                    log_cb(part)
+                    lower = part.lower()
+                    if "enter" in lower and "recovery" in lower:
+                        progress_cb(-1, step="Entering Restore Mode", detail=part.strip())
+                    elif "flash" in lower and "filesystem" in lower:
+                        progress_cb(-1, step="Flashing Filesystem", detail=part.strip())
+                    elif "kernel" in lower:
+                        progress_cb(-1, step="Flashing Kernel", detail=part.strip())
+                    elif "done" in lower or "complete" in lower or "finished" in lower:
+                        progress_cb(100, step="Finalizing", detail=part.strip())
+                    else:
+                        progress_cb(-1, detail=part.strip())
 
-            for i, line in enumerate(lines):
-                log_cb(line)
-                pct = int(10 + (i / max(total_lines, 1)) * 80)
+            if cancelled:
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                raise Exception("Restore cancelled by user.")
 
-                lower = line.lower()
-                if "enter" in lower and "recovery" in lower:
-                    progress_cb(pct, step="Entering Restore Mode", detail=line.strip())
-                elif "flash" in lower or "restore" in lower and "filesystem" in lower:
-                    progress_cb(pct, step="Flashing Filesystem", detail=line.strip())
-                elif "kernel" in lower:
-                    progress_cb(pct, step="Flashing Kernel", detail=line.strip())
-                elif "done" in lower or "complete" in lower or "finished" in lower:
-                    progress_cb(100, step="Finalizing", detail=line.strip())
-                else:
-                    progress_cb(pct, detail=line.strip())
-
-                if is_cancelled_cb():
-                    raise Exception("Restore cancelled by user.")
-
-            if not ok:
-                raise Exception(f"Restore failed:\n{out}")
+            rc = proc.wait()
+            if rc != 0:
+                raise Exception(f"Restore failed (exit code {rc}).")
 
             progress_cb(100, step="Finalizing", detail="Restore completed successfully.")
 
         tm = TaskManager.instance()
+        task_id = "restore_" + str(os.getpid())
+        if tm.is_task_running(task_id):
+            QMessageBox.information(
+                self, "Busy", "A firmware restore is already running.")
+            return
+        self.btn_flash.setEnabled(False)
         tm.start_task(
-            task_id="restore_" + str(os.getpid()),
+            task_id=task_id,
             title="IPSW Firmware Restore",
             subtitle=os.path.basename(path),
             steps=["Preparing Firmware", "Entering Restore Mode", "Flashing Filesystem", "Flashing Kernel", "Finalizing"],
@@ -696,18 +739,38 @@ class RestoreView(QWidget):
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.finished.connect(self._on_dfu_probe_finished)
+        proc.errorOccurred.connect(self._on_dfu_probe_error)
         self._dfu_proc = proc
         self._ram_probe_running = True
+        self._dfu_probe_timeout.start()
         proc.start(exe, ["-q"])
 
-    def _on_dfu_probe_finished(self, exit_code: int, _exit_status) -> None:
+    def _clear_dfu_probe(self) -> None:
         proc = self._dfu_proc
         self._dfu_proc = None
         self._ram_probe_running = False
+        self._dfu_probe_timeout.stop()
+        if proc is not None:
+            proc.deleteLater()
+
+    def _on_dfu_probe_error(self, _error) -> None:
+        # FailedToStart (and friends) emit errorOccurred but never `finished`;
+        # clear the latch so the next poll tick can retry instead of freezing.
+        self._clear_dfu_probe()
+
+    def _on_dfu_probe_timeout(self) -> None:
+        # A hung irecovery emits neither finished nor errorOccurred — kill it.
+        proc = self._dfu_proc
+        if proc is not None:
+            proc.kill()
+        self._clear_dfu_probe()
+
+    def _on_dfu_probe_finished(self, exit_code: int, _exit_status) -> None:
+        proc = self._dfu_proc
         if proc is None:
             return
         out = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
-        proc.deleteLater()
+        self._clear_dfu_probe()
         dev = None
         if exit_code == 0 or "CPID" in out:
             dev = ram.parse_device_info(out)
@@ -827,6 +890,11 @@ class RestoreView(QWidget):
             btn.setEnabled(True)
         if self.tabs.currentWidget() is self._ram_tab:
             self._dfu_timer.start()
+
+    def _on_restore_task_finished(self, info) -> None:
+        if info.task_id.startswith(("restore_", "backup_restore_")):
+            self.btn_flash.setEnabled(True)
+            self.btn_backup_restore.setEnabled(True)
 
     def _ram_usb_ok(self) -> bool:
         if self._ram_busy:

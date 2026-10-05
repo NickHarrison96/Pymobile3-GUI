@@ -233,6 +233,12 @@ class AcquisitionView(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(scroll)
 
+        TaskManager.instance().task_finished.connect(self._on_task_finished)
+
+    def _on_task_finished(self, info):
+        if info.task_id.startswith("acquisition_"):
+            self.btn_start.setEnabled(True)
+
     def _select_mode(self, mode: str):
         self.selected_mode = mode
         for k, card in self.mode_cards.items():
@@ -318,8 +324,14 @@ class AcquisitionView(QWidget):
             log_cb(outcome["message"])
 
         tm = TaskManager.instance()
+        task_id = "acquisition_" + str(os.getpid())
+        if tm.is_task_running(task_id):
+            QMessageBox.information(
+                self, "Busy", "An acquisition is already running.")
+            return
+        self.btn_start.setEnabled(False)
         tm.start_task(
-            task_id="acquisition_" + str(os.getpid()),
+            task_id=task_id,
             title=f"{mode_name} Acquisition",
             subtitle=f"Writing to {out_dir}",
             steps=steps,

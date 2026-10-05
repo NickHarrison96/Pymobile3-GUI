@@ -137,7 +137,9 @@ excludes = [
     "matplotlib",
     "scipy",
     "pandas",
-    "PIL",
+    # NOTE: PIL must NOT be excluded — pymobiledevice3's webinspector
+    # (cdp_screencast) does `from PIL import Image` at module import, and the
+    # CLI dispatcher dynamically imports every command group.
     "pytest",
     "xmlrpc",
 ]
@@ -184,10 +186,8 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="Pymobile3-GUI",
     debug=False,
     bootloader_ignore_signals=False,

@@ -8,8 +8,15 @@ and emit structured PySide6 signals without blocking the GUI.
 import sys
 import asyncio
 import inspect
+import queue
+import threading
 from typing import Dict, Any, Optional
 from PySide6.QtCore import QThread, Signal
+
+# A single usbmux/lockdown query can block forever (pymobiledevice3 sets its
+# sockets to blocking with no timeout). Bound the whole poll so one stalled
+# call can't wedge the poller — and with it the device pane — permanently.
+POLL_TIMEOUT_SECONDS = 15
 
 
 class DevicePoller(QThread):
@@ -24,14 +31,40 @@ class DevicePoller(QThread):
 
     def run(self):
         """Main thread execution polling device state."""
+        # Run the (blocking) poll on a daemon thread and join with a timeout.
+        # If it overruns, we abandon it and report a disconnect so the next
+        # refresh can start a fresh poll — run() must return, otherwise
+        # isRunning() stays True and every later refresh is a no-op.
+        result_queue: "queue.Queue[Any]" = queue.Queue()
+
+        def worker():
+            try:
+                result_queue.put(asyncio.run(self._fetch_device_info()))
+            except Exception as e:
+                result_queue.put(e)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        thread.join(timeout=POLL_TIMEOUT_SECONDS)
+
+        if thread.is_alive():
+            self.poll_error.emit(
+                f"Device poll timed out after {POLL_TIMEOUT_SECONDS}s "
+                "(usbmuxd stalled).")
+            self.device_disconnected.emit()
+            return
+
         try:
-            result = asyncio.run(self._fetch_device_info())
-            if result:
-                self.device_discovered.emit(result)
-            else:
-                self.device_disconnected.emit()
-        except Exception as e:
-            self.poll_error.emit(str(e))
+            result = result_queue.get_nowait()
+        except queue.Empty:
+            result = {}
+
+        if isinstance(result, Exception):
+            self.poll_error.emit(str(result))
+            self.device_disconnected.emit()
+        elif result:
+            self.device_discovered.emit(result)
+        else:
             self.device_disconnected.emit()
 
     async def _fetch_device_info(self) -> Dict[str, Any]:

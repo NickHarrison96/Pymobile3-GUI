@@ -19,6 +19,7 @@
 
 import asyncio
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -433,6 +434,10 @@ class AcquisitionWorker(QObject):
                    f"({size_mb:.1f} MB)")
         if failed:
             summary += f"; skipped: {', '.join(failed)}"
+        # Nothing succeeded: archiving an empty staging tree must not report a
+        # green 100% "completed". Surface it as a failure instead.
+        if not completed:
+            return False, summary
         return True, summary
 
     # -------------------------------------------------------------------------
@@ -652,6 +657,18 @@ def resolve_backup_source(backup_dir: str) -> tuple[str, str | None]:
         "(Backups/<UDID>).")
 
 
+def _backup_is_encrypted(source_dir: str, source: str | None) -> bool:
+    """Best-effort read of the backup set's IsEncrypted flag."""
+    manifest = os.path.join(source_dir, source, "Manifest.plist") if source else None
+    if not manifest or not os.path.isfile(manifest):
+        return False
+    try:
+        with open(manifest, "rb") as f:
+            return bool(plistlib.load(f).get("IsEncrypted"))
+    except Exception:
+        return False
+
+
 def restore_backup(source_dir: str, *, password: str = "", reboot: bool = True,
                    source: str | None = None, base: int = 10, span: int = 85,
                    progress_cb=None, log_cb=None,
@@ -674,6 +691,11 @@ def restore_backup(source_dir: str, *, password: str = "", reboot: bool = True,
     if log_cb:
         shown = [a if a != password else "****" for a in args]
         log_cb(f"Executing: {' '.join(shown)}")
+
+    if not password and _backup_is_encrypted(source_dir, source):
+        raise Exception(
+            "This backup is encrypted. Enter its password before restoring — "
+            "an encrypted restore without one fails silently.")
 
     try:
         proc = subprocess.Popen(pmd3_cmd(args), **_popen_kwargs())
@@ -713,8 +735,14 @@ def restore_backup(source_dir: str, *, password: str = "", reboot: bool = True,
 
     code = proc.wait()
     # Exit codes lie (AGENTS.md): a traceback the CLI swallows still shows up
-    # in the output, so failure = bad exit OR a traceback in the tail.
-    failed = code != 0 or any("Traceback (most recent call last)" in t for t in tail)
+    # in the output, and pymobiledevice3 reports real failures (e.g. "Backup is
+    # encrypted, please supply password.") as a logged ERROR line with exit 0.
+    # So failure = bad exit OR a traceback OR an ERROR log line in the tail.
+    failed = (
+        code != 0
+        or any("Traceback (most recent call last)" in t for t in tail)
+        or any(re.search(r"\bERROR\b", t) for t in tail)
+    )
     if failed:
         raise Exception(
             f"backup2 restore failed (exit {code}):\n" + "\n".join(tail[-12:]))

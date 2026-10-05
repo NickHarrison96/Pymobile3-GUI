@@ -169,7 +169,61 @@ Implementation notes:
 
 ---
 
-## 4. Known-inherited, not regressions
+## 4. Full-project code review & hardening (2026-10-05)
+
+A whole-tree review (core, views, main+ui+packaging) turned up stability and
+durability defects beyond the feature port. Fixed in one pass:
+
+- **Shutdown path** (`main.py`) — there was no `closeEvent`/`aboutToQuit`, so a
+  close mid-acquisition destroyed live `WorkerThread`s, left a half-written
+  forensic backup unflushed, and skipped child cleanup (incl. the elevated
+  tunneld). Added `MainWindow.shutdown()` + `closeEvent` + `aboutToQuit`.
+- **`usb_reset` arbitrary-device reset** (`ramdisk_manager.py`) — the fallback
+  probe dropped `idVendor=0x05AC` and could reset a user's mouse/keyboard.
+  Vendor filter now never widens.
+- **Duplicate-task guard** (`task_manager.py`) — `start_task` overwrote an
+  in-flight `task_id`, so double-clicking Start ran two acquisitions into one
+  output dir. Now rejects duplicates; `cancel_active_task` cancels all running
+  tasks; `active_task_id` only clears when nothing else runs. Start buttons in
+  acquisition/restore views disable until their task finishes.
+- **False success** (`backup_engine.py`) — restore trusted exit code only, but
+  pymobiledevice3 exits 0 on "Backup is encrypted…"; now fails on `\bERROR\b`
+  and pre-checks `IsEncrypted`. Logical+/PRFS no longer reports green 100% when
+  every step failed.
+- **Frozen build** (`ui/assets.py`, `pymobile3_gui.spec`) — icons/fonts resolved
+  via a `__file__` walk that pointed at `_MEIPASS/pymobile3_gui/assets` while
+  the spec installs at `_MEIPASS/assets`, so every icon silently vanished in the
+  bundle. Now `resource_path()`. Also removed the bogus `PIL` exclude
+  (webinspector needs it) and added `exclude_binaries=True` (was onefile inside
+  onedir — double disk + `%TEMP%` re-extraction every launch).
+- **Unreadable dialogs** (`theme.py`, `main.py`) — QMessageBox drew light-on-
+  light (Qt reported Dark but palette Window stayed `#f0f0f0`). Added a dark
+  `get_application_palette()` + `setColorScheme(Dark)` + `QDialog/QMessageBox`
+  QSS. Verified by pixel grab (11% → 97% dark).
+- **Title-bar hit test** (`native_window.py`) — everything right of `rx < 60`
+  returned `HTCAPTION`, so the Refresh button and device chip never got clicks;
+  the drag math also mixed physical and logical pixels. Now `mapFromGlobal` +
+  `childAt` (interactive children get the click, empty space drags).
+- **Cancellation was largely cosmetic** — `run_streaming` never killed its child
+  on cancel (a half-downloaded IPSW kept writing under the next run's `_fresh_dir`);
+  IPSW restore used a single 1200 s `subprocess.run` with cancel checked only
+  after. Both now stream/kill properly.
+- **Hang latching** — `DevicePoller` had no timeout (one stalled usbmux call
+  wedged the pane forever); the DFU probe latched `_ram_probe_running` because
+  `errorOccurred` was never connected. Both bounded now.
+- **Observability & packaging** — `install_global_crash_handler` now also writes
+  a timestamped log file and hooks `threading.excepthook` (was stderr-only, i.e.
+  invisible with `console=False`); `pyproject.toml` gained `paramiko`/`requests`
+  so `pip install .` doesn't ship a broken ramdisk tab; `:focus` outlines added
+  (the global `outline: none` had removed keyboard focus indication entirely).
+
+Still owed (unchanged): the frozen build has not been run end-to-end — the spec
+and asset-path fixes above are source-verified but the PyInstaller build in
+section 2 is the only real proof.
+
+---
+
+## 5. Known-inherited, not regressions
 
 Recorded so nobody re-investigates them as extraction bugs:
 
