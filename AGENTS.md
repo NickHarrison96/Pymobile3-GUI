@@ -39,6 +39,7 @@ pymobile3_gui/
 │       ├── paths.py           # Frozen-aware path resolution
 │       ├── elevation.py       # UAC/admin helpers
 │       ├── process_runner.py  # QProcess streaming runner
+│       ├── ramdisk_manager.py # SSH ramdisk tool (SSHRD_Script port)
 │       └── resource_manager.py# Thread pool, subprocess, crash handler
 ├── views/                     # Full-page workspaces (6 views)
 │   ├── device_view.py
@@ -56,7 +57,7 @@ pymobile3_gui/
 │   ├── operation_drawer.py    # Expandable log/progress drawer
 │   ├── toast.py               # Overlay notifications
 │   └── assets.py              # Font loading
-└── assets/                    # Fonts, SVG icons
+└── assets/                    # Fonts, SVG icons, SSH ramdisk tools (sshrd/)
 ```
 
 ## Key Conventions
@@ -104,7 +105,9 @@ pymobile3_gui/
     `Built/Hacked by: NïćĦäřřïšøň`). Log via Qt signals/`Toast` instead, or open
     files explicitly with `encoding='utf-8'`.
   - When writing test/smoke scripts, avoid printing strings that may contain
-    emoji; print counts/booleans instead (`print('tabs:', n)`).
+    emoji; print counts/booleans instead (`print('tabs:', n)`). This applies
+    to GUI widget text too — a test that printed a warning label blew up on
+    its leading `⚠`, not on any emoji.
   - If a subprocess output must be captured, decode with
     `errors='replace'` or read bytes and open with `encoding='utf-8'`.
   - Emoji **are fine** inside the GUI (tab labels, buttons) — Qt renders them
@@ -139,13 +142,50 @@ pymobile3_gui/
   download, or mount, size the timeout for the whole cycle and say so in the
   busy message.
 
+### Asset paths and WSL argv (SSHRD integration)
+- **`paths.app_dir()` used one `dirname` too few from source.** The double
+  dirname was inherited from RootForgeKit, where `paths.py` sat two levels
+  down; here it resolves to `pymobile3_gui/core`, so every `resource_path()`
+  silently pointed inside `core/` and returned nothing (harmless only because
+  `ui/assets.py` resolves its own paths). Fixed to three dirnames; frozen
+  (`_MEIPASS`) is unchanged and matches the spec's `datas`.
+- **WSL rewrites cwd but never argv.** A raw `C:\...` argument handed to
+  `wsl_tool()` reaches the Linux binary as a relative filename with
+  backslashes and fails as "file not found" — deep into the build, after the
+  IPSW download. `wsl_arg()` translates any drive-prefixed arg to
+  `/mnt/<drive>/...`; relative args, URLs and hex bags pass through.
+- **Prevention:** both bugs were caught by `tests/test_ramdisk_manager.py`
+  asserting the *constructed command* rather than running it. For anything
+  that shells out, stub the runner and assert argv.
+- **pzb exits 0 on failure** — `_pzb_fetch()` checks the output file exists
+  and is non-empty before believing it; keep that check if you add fetches.
+
 ## Active Development
 
-### SSH Ramdisk Integration (branch: `feature/sshrd-ramdisk`)
-- Porting SSHRD_Script (checkm8 SSH ramdisk tool) into the GUI
-- Target: new `core/backend/ramdisk_manager.py` + integration into Recovery & Restore view
-- Uses bundled/downloaded Linux binaries (gaster, irecovery, img4, etc.)
-- Orchestrated via `TaskManager` with progress reporting
+### SSH Ramdisk (branch: `feature/sshrd-ramdisk`) — implemented, untested on hardware
+- Ports SSHRD_Script (checkm8, A7-A11/T2) into the GUI:
+  - `core/backend/ramdisk_manager.py` — `op_create`, `op_boot`, `op_reset`,
+    `op_reboot`, `op_dump_blobs`, `op_clean`, `open_ssh_console`; failures
+    raise `RamdiskError` (the TaskManager shows its message). Step lists live
+    next to the ops (`CREATE_STEPS`, `BOOT_STEPS`, ...) and the worker's
+    `step=` strings must match them exactly.
+  - **Hybrid execution:** file/patch steps run vendored Linux tools in WSL
+    (`wsl_tool`); DFU/USB steps run vendored Windows exes (`native_tool`:
+    gaster, irecovery, iproxy). No usbipd/usb passthrough.
+  - `gaster reset` does not exist in any Windows gaster build — `usb_reset()`
+    issues libusb `reset_device` via pyusb instead (vendored
+    `assets/sshrd/win/libusb-1.0.dll`).
+  - Assets vendored at `pymobile3_gui/assets/sshrd/` (`Linux/`, `win/`,
+    `shsh/`, `sshtars/`, `bootlogo.im4p`), shipped via the spec's `datas`;
+    `.gitignore` carries a negation for `sshtars/*.tar.gz`.
+  - UI: "SSH Ramdisk" tab at index 2 of the Recovery & Restore view —
+    `irecovery -q` DFU poll (QProcess, only while the tab is visible),
+    ipsw.me version combo fetched off-thread, iOS 16.1+ build-block warning,
+    busy-state disables all seven action buttons.
+  - Tests: `tests/` — 64 offline tests (sshrd.sh decision tables, manifest
+    parsing, argv construction with `run_streaming` stubbed, offscreen tab
+    smoke). **No checkm8 device has ever run it** — the only test phone is
+    an A16, so pwn/boot/erase/dump all remain unverified live.
 
 ## Known Gaps (from docs/TODO.md)
 

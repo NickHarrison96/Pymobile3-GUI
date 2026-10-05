@@ -67,15 +67,17 @@ def pmd3_cmd(args: list[str]) -> list[str]:
 
 def app_dir() -> str:
     """
-    Root of the shipped application files (styles.qss, resources/, bin/).
+    Root of the shipped application files (assets/, resources/, bin/).
 
     Frozen, PyInstaller sets sys._MEIPASS to the unpack directory. From source
-    this is the project root — utils/ is one level down, hence the double
-    dirname.
+    this file sits at pymobile3_gui/core/backend/paths.py, so the shipped
+    files live three levels up at pymobile3_gui/ — one dirname too deep was
+    inherited from RootForgeKit, where paths.py sat only two levels down.
     """
     if is_frozen():
         return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    here = os.path.abspath(__file__)
+    return os.path.dirname(os.path.dirname(os.path.dirname(here)))
 
 
 def resource_path(*parts: str) -> str:

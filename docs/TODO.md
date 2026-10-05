@@ -112,6 +112,14 @@ Implementation notes:
 
 ## 2. Verification still owed
 
+- [ ] **SSH Ramdisk on real checkm8 hardware.** The port ships with 64 offline
+      tests (`tests/`): sshrd.sh decision tables (darwin mapping, trustcache,
+      16.1 build block), BuildManifest parsing, argv construction with the
+      runner stubbed, and an offscreen tab smoke — but no A7-A11 device has
+      ever run it (the only test phone is an A16). Owed: `gaster pwn` on real
+      hardware, a full `Create` against an actual IPSW, `Boot`, the
+      erase/obliteration path, and a blob dump. Also confirm the DFU driver
+      story (Zadig/WinUSB) on a clean Windows install.
 - [ ] **Rebuild and test the frozen binary.** The `sys.executable -m` fix and
       the expanded spec are verified from source and by simulation, but not yet
       against an actual PyInstaller build. Run

@@ -12,7 +12,7 @@ A native-feel PySide6 desktop application for Windows 10/11 with Mica/Acrylic ba
 - **Developer Tools** — Progressive readiness pipeline (Dev Mode → DDI → RSD Tunnel) + DVT instruments (process monitor with search/kill/launch, bundle-id lookup, system monitor, screenshot, GPS simulation)
 - **Recovery & Restore** — IPSW firmware flashing via `idevicerestore`, iTunes-style backup restore (with encrypted-backup password support), interactive Recovery/DFU hardware guides
 - **Live Syslog** — Streaming console with filtering, pause/resume, export
-- **SSH Ramdisk** *(in development)* — checkm8 ramdisk creation and boot for A7-A11 devices
+- **SSH Ramdisk** — checkm8 ramdisk create/boot for A7-A11 & T2 devices, device erase, on-board SHSH dump, SSH console
 
 ## Requirements
 
@@ -75,12 +75,20 @@ When "Developer services" reads green, DVT tabs are functional.
 
 ## SSH Ramdisk (checkm8 Devices)
 
-The SSH Ramdisk feature (in development on `feature/sshrd-ramdisk`) ports [SSHRD_Script](https://github.com/verygenericname/SSHRD_Script) into the GUI. It supports A7-A11 devices and provides:
+The **SSH Ramdisk** tab in Recovery & Restore ports [SSHRD_Script](https://github.com/verygenericname/SSHRD_Script) into the GUI for A7-A11 and T2 devices (CPID `0x8960`/`0x7000`/`0x7001`/`0x8000`/`0x8003`/`0x8010`/`0x8011`/`0x8012`/`0x8015`):
 
-- Ramdisk creation from IPSW firmware
-- DFU pwn + boot via gaster/irecovery
-- SSH access to the device filesystem
-- SHSH blob dumping
+- **Create** — build a ramdisk from a signed IPSW (ipsw.me version lookup, partial downloads via `pzb`)
+- **Boot / Erase / Reboot** — checkm8 pwn via gaster, bootchain delivery via irecovery
+- **Dump SHSH Blobs** — read on-board blobs over SSH (iproxy + paramiko)
+- **Open SSH Console** — root shell at `localhost:2222` while the ramdisk runs
+
+Requirements:
+
+- **WSL (Ubuntu)** — build steps run the bundled Linux tools (`img4`, `img4tool`, `hfsplus`, `pzb`, `iBoot64Patcher`, ...) inside WSL; DFU/USB steps run natively on Windows through the vendored exes in `assets/sshrd/win/`
+- **DFU mode** with a WinUSB/libusbk driver (Zadig) on the Apple DFU device
+- iOS **16.0 or older** for the build step (upstream `sshrd.sh` Linux branch refuses 16.1+)
+
+All binaries, SHSH blobs and payload tars are vendored in `pymobile3_gui/assets/sshrd/` — only IPSW firmware parts are downloaded, on first build. Run the offline test suite with `pytest`.
 
 ## License
 

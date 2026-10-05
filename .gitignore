@@ -18,6 +18,8 @@ dist/
 *.zip
 *.7z
 *.tar.gz
+# ...but the vendored SSH ramdisk payloads under assets are source, not output
+!pymobile3_gui/assets/sshrd/sshtars/*.tar.gz
 
 # Packaging metadata
 *.egg-info/
