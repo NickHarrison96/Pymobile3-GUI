@@ -1,7 +1,7 @@
 ---
 
 
-<img width="1920" height="1040" alt="asd" src="https://github.com/user-attachments/assets/666cd9dd-d229-4176-8178-755cfe724b8f" />
+<img width="1920" height="1040" alt="ggg" src="https://github.com/user-attachments/assets/ea2f0dcc-0d2a-4ae9-a766-a950067d25f6" />
 
 
 ---
