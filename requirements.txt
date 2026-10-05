@@ -13,3 +13,9 @@ psutil>=5.9.0
 
 # Async compatibility for AFC service
 nest-asyncio>=1.5.0
+
+# SSH ramdisk tool (ssh_exec / blob dump over the iproxy tunnel)
+paramiko>=3.0
+
+# ipsw.me firmware + IPSW metadata lookups (SSHRD port)
+requests>=2.28

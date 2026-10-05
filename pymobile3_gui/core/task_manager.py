@@ -108,6 +108,14 @@ class TaskManager(QObject):
     ) -> TaskInfo:
         """Register and start a background operation."""
         with QMutexLocker(self._mutex):
+            # Reject a restart of an in-flight task: two workers writing the
+            # same task_id (and often the same output directory) corrupt the
+            # result and make cancellation impossible (active_task_id gets
+            # cleared by whichever worker finishes first).
+            existing = self.tasks.get(task_id)
+            if existing and existing.is_running:
+                return existing
+
             task_steps = [TaskStep(name=s) for s in steps]
             info = TaskInfo(
                 task_id=task_id,
@@ -134,16 +142,40 @@ class TaskManager(QObject):
             return info
 
     def cancel_active_task(self):
-        """Request cancellation of currently running task."""
+        """Request cancellation of all currently running tasks."""
         with QMutexLocker(self._mutex):
-            if self.active_task_id and self.active_task_id in self.workers:
-                task = self.tasks.get(self.active_task_id)
-                if task:
+            for task_id, worker in list(self.workers.items()):
+                task = self.tasks.get(task_id)
+                if task and task.is_running:
                     task.is_cancelled = True
                     task.status_text = "Cancelling..."
-                self.workers[self.active_task_id].cancel()
-                if task:
+                    worker.cancel()
                     self.task_progress.emit(task)
+
+    def is_task_running(self, task_id: str) -> bool:
+        """True when a task with this id is registered and still running."""
+        with QMutexLocker(self._mutex):
+            task = self.tasks.get(task_id)
+            return bool(task and task.is_running)
+
+    def shutdown(self, wait_ms: int = 3000) -> None:
+        """
+        Cooperative shutdown: cancel every running task, then wait (bounded)
+        for each worker thread to exit. Called from the window's close path so
+        we do not destroy live QThreads.
+        """
+        running = []
+        with QMutexLocker(self._mutex):
+            for task_id, worker in list(self.workers.items()):
+                if worker.isRunning():
+                    task = self.tasks.get(task_id)
+                    if task:
+                        task.is_cancelled = True
+                        task.status_text = "Cancelling..."
+                    worker.cancel()
+                    running.append(worker)
+        for worker in running:
+            worker.wait(wait_ms)
 
     def _on_worker_progress(self, task_id: str, pct: int, step_name: str, detail: str):
         with QMutexLocker(self._mutex):
@@ -206,7 +238,14 @@ class TaskManager(QObject):
                     if s.status == "running":
                         s.status = "failed"
 
+            # Only clear the active pointer when no other worker is still
+            # running, otherwise a second in-flight task becomes "invisible"
+            # to cancel_all/dock state.
             if self.active_task_id == task_id:
                 self.active_task_id = None
+                for other_id, w in self.workers.items():
+                    if other_id != task_id and w.isRunning():
+                        self.active_task_id = other_id
+                        break
 
             self.task_finished.emit(task)

@@ -186,10 +186,13 @@ class AcquisitionView(QWidget):
         self.chk_crash.setChecked(True)
         self.chk_apps = QCheckBox("Installed App Inventory", self)
         self.chk_apps.setChecked(True)
+        self.chk_keep = QCheckBox("Keep intermediate files (skip archiving)", self)
+        self.chk_keep.setChecked(False)
 
         opts_box.addWidget(self.chk_media)
         opts_box.addWidget(self.chk_crash)
         opts_box.addWidget(self.chk_apps)
+        opts_box.addWidget(self.chk_keep)
         opts_box.addStretch()
         layout.addLayout(opts_box)
 
@@ -230,6 +233,12 @@ class AcquisitionView(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(scroll)
 
+        TaskManager.instance().task_finished.connect(self._on_task_finished)
+
+    def _on_task_finished(self, info):
+        if info.task_id.startswith("acquisition_"):
+            self.btn_start.setEnabled(True)
+
     def _select_mode(self, mode: str):
         self.selected_mode = mode
         for k, card in self.mode_cards.items():
@@ -253,7 +262,7 @@ class AcquisitionView(QWidget):
             "incl_media": self.chk_media.isChecked(),
             "incl_crash": self.chk_crash.isChecked(),
             "incl_apps": self.chk_apps.isChecked(),
-            "keep_intermediate": False,
+            "keep_intermediate": self.chk_keep.isChecked(),
         }
 
         # Built from the engine's own plan so every checklist entry matches a
@@ -315,8 +324,14 @@ class AcquisitionView(QWidget):
             log_cb(outcome["message"])
 
         tm = TaskManager.instance()
+        task_id = "acquisition_" + str(os.getpid())
+        if tm.is_task_running(task_id):
+            QMessageBox.information(
+                self, "Busy", "An acquisition is already running.")
+            return
+        self.btn_start.setEnabled(False)
         tm.start_task(
-            task_id="acquisition_" + str(os.getpid()),
+            task_id=task_id,
             title=f"{mode_name} Acquisition",
             subtitle=f"Writing to {out_dir}",
             steps=steps,

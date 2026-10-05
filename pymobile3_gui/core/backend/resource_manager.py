@@ -5,6 +5,8 @@
 import sys
 import os
 import subprocess
+import threading
+import time
 import traceback
 from PySide6.QtCore import QThreadPool
 
@@ -46,7 +48,8 @@ def configure_global_thread_pool() -> int:
 
 
 def safe_run_command(cmd: list[str], timeout: int = 10,
-                     env: dict | None = None) -> tuple[bool, str]:
+                     env: dict | None = None,
+                     include_stderr: bool = False) -> tuple[bool, str]:
     """
     Executes CLI processes with strict timeout and exception handling
     to ensure worker threads never hang indefinitely.
@@ -55,6 +58,9 @@ def safe_run_command(cmd: list[str], timeout: int = 10,
     Args:
         env: Optional environment overrides merged onto the current environment.
              Used to inject PYMOBILEDEVICE3_TUNNEL for iOS 17+ developer commands.
+        include_stderr: Append stderr to the returned text on success. pymobiledevice3
+             logs failures (e.g. "Developer Mode is disabled") to stderr while still
+             exiting 0, so without this a failed command looks successful.
     """
     try:
         startupinfo = None
@@ -85,7 +91,11 @@ def safe_run_command(cmd: list[str], timeout: int = 10,
             check=False
         )
         if res.returncode == 0:
-            return True, (res.stdout or "").strip()
+            out = (res.stdout or "").strip()
+            if include_stderr:
+                err = (res.stderr or "").strip()
+                out = f"{out}\n{err}".strip() if out else err
+            return True, out
         else:
             err = (res.stderr or "").strip() or f"Process exited with code {res.returncode}"
             return False, err
@@ -98,21 +108,48 @@ def safe_run_command(cmd: list[str], timeout: int = 10,
 
 
 def install_global_crash_handler(log_callback=None):
-    """Intercepts unhandled Python exceptions and forwards reports to the GUI console."""
+    """
+    Intercepts unhandled Python exceptions and forwards reports to the GUI
+    console and a timestamped log file.
+
+    The frozen build runs console=False, so sys.stderr is invisible — a crash
+    that only went to stderr would leave nothing for a bug report. The file in
+    logs_dir() (plus the optional GUI callback) is what actually survives.
+    Also hooks threading.excepthook, which catches exceptions raised in
+    QThread.run / plain threads that sys.excepthook never sees.
+    """
+
+    def _emit(text: str) -> None:
+        if log_callback:
+            try:
+                log_callback(text)
+            except Exception:
+                pass
+        try:
+            from pymobile3_gui.core.backend.paths import logs_dir
+            path = os.path.join(logs_dir(), time.strftime("crash-%Y%m%d-%H%M%S.log"))
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(text + "\n")
+        except Exception:
+            pass
+        try:
+            sys.stderr.write(text)
+        except Exception:
+            pass
+
     def handle_exception(exc_type, exc_value, exc_traceback):
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
             return
-
         err_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-        crash_report = f"\n[!] CRITICAL EXCEPTION TRAPPED:\n{err_msg}"
+        _emit(f"\n[!] CRITICAL EXCEPTION TRAPPED:\n{err_msg}")
 
-        if log_callback:
-            try:
-                log_callback(crash_report)
-            except Exception:
-                sys.stderr.write(crash_report)
-        else:
-            sys.stderr.write(crash_report)
+    def handle_thread_exception(args):
+        exc_type = getattr(args, "exc_type", Exception)
+        exc_value = getattr(args, "exc_value", None)
+        exc_tb = getattr(args, "exc_traceback", None)
+        err_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        _emit(f"\n[!] UNHANDLED THREAD EXCEPTION:\n{err_msg}")
 
     sys.excepthook = handle_exception
+    threading.excepthook = handle_thread_exception

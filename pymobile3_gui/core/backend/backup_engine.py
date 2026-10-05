@@ -19,6 +19,7 @@
 
 import asyncio
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -207,6 +208,20 @@ def plan_steps(mode: str, options: dict | None = None) -> list[str]:
     if steps:
         steps.append(STEP_ARCHIVE)
     return steps
+
+
+def _popen_kwargs() -> dict:
+    kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "env": {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    return kwargs
 
 
 class AcquisitionWorker(QObject):
@@ -419,6 +434,10 @@ class AcquisitionWorker(QObject):
                    f"({size_mb:.1f} MB)")
         if failed:
             summary += f"; skipped: {', '.join(failed)}"
+        # Nothing succeeded: archiving an empty staging tree must not report a
+        # green 100% "completed". Surface it as a failure instead.
+        if not completed:
+            return False, summary
         return True, summary
 
     # -------------------------------------------------------------------------
@@ -505,17 +524,7 @@ class AcquisitionWorker(QObject):
         return pmd3_cmd(args)
 
     def _popen_kwargs(self) -> dict:
-        kwargs = {
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.STDOUT,
-            "text": True,
-            "encoding": "utf-8",
-            "errors": "replace",
-            "env": {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
-        }
-        if os.name == "nt":
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-        return kwargs
+        return _popen_kwargs()
 
     def _stream(self, args: list[str], step_label: str = "",
                 base: int | None = None, span: int | None = None,
@@ -610,3 +619,132 @@ class AcquisitionWorker(QObject):
 
     def _elapsed(self) -> str:
         return format_duration(time.time() - self._started_at)
+
+
+# -----------------------------------------------------------------------------
+# Restore (backup2 restore) — the inverse of a Logical acquisition
+# -----------------------------------------------------------------------------
+
+def resolve_backup_source(backup_dir: str) -> tuple[str, str | None]:
+    """
+    Normalize a user-picked path for `backup2 restore`.
+
+    pymobiledevice3 wants the *parent* folder that contains <UDID>/, but
+    users naturally pick the UDID folder itself — or a parent holding
+    several backup sets. Returns (directory_to_pass, source_udid_hint);
+    the hint pins --source so an ambiguous folder still restores the set
+    the user actually selected.
+
+    Raises ValueError with a plain explanation when no backup set is found.
+    """
+    path = os.path.abspath(os.path.expanduser(backup_dir))
+    if not os.path.isdir(path):
+        raise ValueError(f"Backup folder does not exist:\n{path}")
+    if os.path.isfile(os.path.join(path, "Manifest.plist")):
+        return os.path.dirname(path), os.path.basename(path)
+    try:
+        children = [d for d in os.listdir(path)
+                    if os.path.isfile(os.path.join(path, d, "Manifest.plist"))]
+    except OSError:
+        children = []
+    if children:
+        # One set: pin it. Several: leave --source off and let the CLI fall
+        # back to the connected device's own UDID.
+        return path, children[0] if len(children) == 1 else None
+    raise ValueError(
+        "No backup set found here — expected a Manifest.plist in this folder "
+        "or in a UDID subfolder. Pick the folder pymobiledevice3 created "
+        "(Backups/<UDID>).")
+
+
+def _backup_is_encrypted(source_dir: str, source: str | None) -> bool:
+    """Best-effort read of the backup set's IsEncrypted flag."""
+    manifest = os.path.join(source_dir, source, "Manifest.plist") if source else None
+    if not manifest or not os.path.isfile(manifest):
+        return False
+    try:
+        with open(manifest, "rb") as f:
+            return bool(plistlib.load(f).get("IsEncrypted"))
+    except Exception:
+        return False
+
+
+def restore_backup(source_dir: str, *, password: str = "", reboot: bool = True,
+                   source: str | None = None, base: int = 10, span: int = 85,
+                   progress_cb=None, log_cb=None,
+                   is_cancelled_cb=None) -> None:
+    """
+    Stream `backup2 restore` to completion. No timeout — a large restore can
+    legitimately run for a long time. Raises on failure or cancellation.
+
+    progress_cb receives the overall 0-100 percentage (tqdm's bar mapped into
+    base..base+span) plus a detail kwarg carrying the current output line;
+    log_cb receives every raw line.
+    """
+    args = ["backup2", "restore", source_dir,
+            "--reboot" if reboot else "--no-reboot"]
+    if source:
+        args += ["--source", source]
+    if password:
+        args += ["--password", password]
+
+    if log_cb:
+        shown = [a if a != password else "****" for a in args]
+        log_cb(f"Executing: {' '.join(shown)}")
+
+    if not password and _backup_is_encrypted(source_dir, source):
+        raise Exception(
+            "This backup is encrypted. Enter its password before restoring — "
+            "an encrypted restore without one fails silently.")
+
+    try:
+        proc = subprocess.Popen(pmd3_cmd(args), **_popen_kwargs())
+    except Exception as e:
+        raise Exception(f"Could not start backup2 restore: {e}")
+
+    tail: list[str] = []
+    last_pct = -1
+    cancelled = False
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        if is_cancelled_cb and is_cancelled_cb():
+            cancelled = True
+            proc.terminate()
+            break
+        # tqdm redraws with \r, so one read can carry several updates.
+        for part in re.split(r"[\r\n]", line):
+            part = part.rstrip()
+            if not part:
+                continue
+            tail.append(part)
+            if log_cb:
+                log_cb(part)
+            pct = AcquisitionWorker._parse_percent(part)
+            if pct is not None and int(pct) != last_pct and progress_cb:
+                last_pct = int(pct)
+                overall = int(base + span * pct / 100)
+                progress_cb(min(overall, base + span), detail=part[:110])
+
+    if cancelled:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        raise Exception("Restore cancelled by user.")
+
+    code = proc.wait()
+    # Exit codes lie (AGENTS.md): a traceback the CLI swallows still shows up
+    # in the output, and pymobiledevice3 reports real failures (e.g. "Backup is
+    # encrypted, please supply password.") as a logged ERROR line with exit 0.
+    # So failure = bad exit OR a traceback OR an ERROR log line in the tail.
+    failed = (
+        code != 0
+        or any("Traceback (most recent call last)" in t for t in tail)
+        or any(re.search(r"\bERROR\b", t) for t in tail)
+    )
+    if failed:
+        raise Exception(
+            f"backup2 restore failed (exit {code}):\n" + "\n".join(tail[-12:]))
+    if progress_cb:
+        progress_cb(base + span, detail="Restore completed.")

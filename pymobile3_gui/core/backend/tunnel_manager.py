@@ -569,7 +569,8 @@ TUNNEL_HINT = (
 
 def run_developer_command(args: list[str], timeout: int = 20,
                           udid: str | None = None,
-                          require_tunnel: bool = True) -> tuple[bool, str]:
+                          require_tunnel: bool = True,
+                          include_stderr: bool = False) -> tuple[bool, str]:
     """
     Run a `pymobiledevice3 developer ...` style command through the tunnel.
 
@@ -577,6 +578,9 @@ def run_developer_command(args: list[str], timeout: int = 20,
         args: pymobiledevice3 arguments, e.g. ["developer", "dvt", "proclist"].
         udid: Target device; omit to use tunneld's only device.
         require_tunnel: Fail fast with guidance when no tunnel is up.
+        include_stderr: Append stderr to the output. pymobiledevice3 logs many
+            failures to stderr while still exiting 0 — text commands (launch,
+            kill, arbitration) must enable this or they look successful.
 
     Returns:
         (ok, output) — on failure the output carries actionable guidance.
@@ -612,7 +616,8 @@ def run_developer_command(args: list[str], timeout: int = 20,
         )
 
     cmd = pmd3_cmd(args)
-    ok, out = safe_run_command(cmd, timeout=timeout, env=env)
+    ok, out = safe_run_command(cmd, timeout=timeout, env=env,
+                               include_stderr=include_stderr)
 
     if not ok:
         # Check for common failure patterns and add guidance

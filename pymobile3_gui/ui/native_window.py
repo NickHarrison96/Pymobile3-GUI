@@ -2,7 +2,7 @@
 import sys
 import ctypes
 from ctypes import c_int, byref, sizeof, Structure
-from PySide6.QtWidgets import QMainWindow, QWidget
+from PySide6.QtWidgets import QMainWindow, QWidget, QPushButton
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QColor, QPainter
 
@@ -93,16 +93,20 @@ class NativeFramelessWindow(QMainWindow):
         x = ctypes.c_short(msg.lParam & 0xFFFF).value
         y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
 
-        # Convert screen coords to window coords
-        rect = self.frameGeometry()
-        rx = x - rect.left()
-        ry = y - rect.top()
+        # WM_NCHITTEST carries raw physical screen pixels, but Qt geometry is
+        # device-independent. mapFromGlobal converts both the DPI scale and the
+        # window offset in one step; the old manual `x - frameGeometry().left()`
+        # broke on any display at != 100% scaling.
+        local = self.mapFromGlobal(QPoint(x, y))
+        rx, ry = local.x(), local.y()
+        w = self.width()
+        h = self.height()
 
         # Check resize margins
         left = rx < RESIZE_MARGIN
-        right = rx > rect.width() - RESIZE_MARGIN
+        right = rx > w - RESIZE_MARGIN
         top = ry < RESIZE_MARGIN
-        bottom = ry > rect.height() - RESIZE_MARGIN
+        bottom = ry > h - RESIZE_MARGIN
 
         if top and left:
             return True, HTTOPLEFT
@@ -121,15 +125,15 @@ class NativeFramelessWindow(QMainWindow):
         if bottom:
             return True, HTBOTTOM
 
-        # Title bar area (top 40px, excluding traffic lights area)
+        # Title bar area. Only empty space (or non-interactive labels) starts a
+        # caption drag — interactive children (traffic lights, the Refresh
+        # button) must receive their own clicks. The old `rx < 60` carve-out
+        # left everything right of the traffic lights unreachable.
         if ry < 40 and self.title_bar_widget:
-            title_rect = self.title_bar_widget.geometry()
-            # Allow drag only on empty space in title bar
-            if title_rect.contains(rx, ry):
-                # Check if clicking on traffic light buttons area (left 60px)
-                if rx < 60:
-                    return True, HTCLIENT
-                return True, HTCAPTION
+            child = self.childAt(local)
+            if isinstance(child, QPushButton):
+                return True, HTCLIENT
+            return True, HTCAPTION
 
         return True, HTCLIENT
 

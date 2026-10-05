@@ -62,6 +62,36 @@ class Colors:
     TRAFFIC_MAX = "#28c840"
 
 
+def get_application_palette() -> QPalette:
+    """
+    Dark QPalette applied at startup so native widgets (QMessageBox, dialogs,
+    tooltips, menus) that have no QSS rule still render dark instead of the
+    platform's light default. Without this, a QMessageBox draws near-white
+    background (#f0f0f0) while the QSS colours every label light — light text
+    on a light background, i.e. invisible.
+    """
+    pal = QPalette()
+    pal.setColor(QPalette.ColorRole.Window, QColor(Colors.BG_SURFACE))
+    pal.setColor(QPalette.ColorRole.WindowText, QColor(Colors.TEXT_PRIMARY))
+    pal.setColor(QPalette.ColorRole.Base, QColor(Colors.BG_CARD))
+    pal.setColor(QPalette.ColorRole.AlternateBase, QColor(Colors.BG_SURFACE))
+    pal.setColor(QPalette.ColorRole.Text, QColor(Colors.TEXT_PRIMARY))
+    pal.setColor(QPalette.ColorRole.Button, QColor(Colors.BG_CARD))
+    pal.setColor(QPalette.ColorRole.ButtonText, QColor(Colors.TEXT_PRIMARY))
+    pal.setColor(QPalette.ColorRole.ToolTipBase, QColor(Colors.BG_CARD))
+    pal.setColor(QPalette.ColorRole.ToolTipText, QColor(Colors.TEXT_PRIMARY))
+    pal.setColor(QPalette.ColorRole.Highlight, QColor(Colors.ACCENT_PRIMARY))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(Colors.TEXT_MUTED))
+    pal.setColor(QPalette.ColorRole.Link, QColor(Colors.BORDER_FOCUS))
+    pal.setColor(QPalette.ColorRole.LinkVisited, QColor(Colors.ACCENT_PRIMARY_HOVER))
+    disabled = QPalette.ColorGroup.Disabled
+    pal.setColor(disabled, QPalette.ColorRole.Text, QColor(Colors.TEXT_MUTED))
+    pal.setColor(disabled, QPalette.ColorRole.WindowText, QColor(Colors.TEXT_MUTED))
+    pal.setColor(disabled, QPalette.ColorRole.ButtonText, QColor(Colors.TEXT_MUTED))
+    return pal
+
+
 def get_application_stylesheet() -> str:
     """Returns the primary QSS stylesheet for the application."""
     return f"""
@@ -74,6 +104,13 @@ def get_application_stylesheet() -> str:
 
     QMainWindow {{
         background-color: transparent;
+    }}
+
+    /* Native dialogs & message boxes have no per-widget QSS elsewhere, so pin
+       a dark surface here — otherwise they fall back to the light platform
+       background while every label is styled light-on-light. */
+    QDialog, QMessageBox {{
+        background-color: {Colors.BG_SURFACE};
     }}
 
     /* Scrollbars */
@@ -182,6 +219,15 @@ def get_application_stylesheet() -> str:
     }}
     QLineEdit:focus {{
         border-color: {Colors.BORDER_FOCUS};
+    }}
+
+    /* Keyboard focus — the global `outline: none` above otherwise removes the
+       focus rectangle from every control, so keyboard/assistive users get no
+       visible indication of where they are. */
+    QPushButton:focus, QCheckBox:focus, QRadioButton:focus,
+    QComboBox:focus, QTabBar::tab:focus {{
+        outline: 1px solid {Colors.BORDER_FOCUS};
+        outline-offset: 1px;
     }}
 
     /* Tables & Tree Views */

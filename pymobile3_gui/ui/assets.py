@@ -3,7 +3,13 @@ from PySide6.QtGui import QFontDatabase, QIcon, QPixmap, QPainter
 from PySide6.QtCore import Qt, QByteArray
 from PySide6.QtSvg import QSvgRenderer
 
-ASSET_DIR = Path(__file__).resolve().parent.parent / "assets"
+from pymobile3_gui.core.backend.paths import resource_path
+
+# Resolve through resource_path() so this works both from source and in the
+# frozen build. A naive Path(__file__) walk points at _MEIPASS/pymobile3_gui/
+# assets in a PyInstaller bundle, but the spec installs fonts/icons at
+# _MEIPASS/assets — the two paths never meet and every icon silently vanishes.
+ASSET_DIR = Path(resource_path("assets"))
 FONT_DIR = ASSET_DIR / "fonts"
 ICON_DIR = ASSET_DIR / "icons"
 

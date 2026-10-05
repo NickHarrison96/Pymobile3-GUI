@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal
 from PySide6.QtGui import QIcon, QFont
 
-from pymobile3_gui.ui.theme import get_application_stylesheet, Colors
+from pymobile3_gui.ui.theme import get_application_stylesheet, get_application_palette, Colors
 from pymobile3_gui.ui.assets import load_fonts
 from pymobile3_gui.ui.native_window import NativeFramelessWindow
 from pymobile3_gui.ui.title_bar import TitleBar
@@ -27,6 +27,7 @@ from pymobile3_gui.core.task_manager import TaskManager
 from pymobile3_gui.core.backend.tunnel_manager import get_tunnel_manager
 from pymobile3_gui.core.backend.elevation import is_admin, relaunch_as_admin
 from pymobile3_gui.core.backend.paths import PMD3_ARGV_FLAG
+from pymobile3_gui.core.backend.resource_manager import install_global_crash_handler
 
 from pymobile3_gui.views.device_view import DeviceView
 from pymobile3_gui.views.files_apps_view import FilesAppsView
@@ -185,6 +186,31 @@ class MainWindow(NativeFramelessWindow):
         if getattr(self, "toast", None):
             self.toast.reposition()
 
+    def shutdown(self):
+        """
+        Cooperative teardown so a close never destroys live threads or leaves
+        a half-written forensic backup. Cancel + wait for tasks, the reconnect
+        worker and the poller, then stop the tunnel. Idempotent: safe to call
+        from both closeEvent and aboutToQuit.
+        """
+        TaskManager.instance().shutdown(wait_ms=3000)
+
+        if self._tunnel_reconnect_worker and self._tunnel_reconnect_worker.isRunning():
+            self._tunnel_reconnect_worker.wait(3000)
+
+        if self.poller.isRunning():
+            self.poller.wait(3000)
+
+        try:
+            get_tunnel_manager().stop()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
+        event.accept()
+
     def _on_tunnel_lost(self, detail: str):
         """
         Offer a reconnect rather than performing one. No timeout: an unattended
@@ -290,10 +316,14 @@ def main():
     _set_windows_app_id()
     app = QApplication(sys.argv)
     load_fonts()
+    app.styleHints().setColorScheme(Qt.ColorScheme.Dark)
+    app.setPalette(get_application_palette())
     app.setStyleSheet(get_application_stylesheet())
 
     window = MainWindow()
     window.show()
+    app.aboutToQuit.connect(window.shutdown)
+    install_global_crash_handler(log_callback=window.operation_drawer.append_log)
 
     sys.exit(app.exec())
 

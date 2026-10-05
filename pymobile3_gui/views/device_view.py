@@ -10,11 +10,12 @@ import time
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QGridLayout, QScrollArea, QSizePolicy, QMessageBox,
-    QProgressBar
+    QProgressBar, QLineEdit, QCheckBox, QTextBrowser
 )
 from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtGui import QFont, QCursor
 from pymobile3_gui.ui.theme import Colors
+from pymobile3_gui.core.backend.lockdown_ops import LockdownOps
 
 
 class SpecCard(QFrame):
@@ -270,6 +271,167 @@ class DeviceView(QWidget):
 
         layout.addLayout(ctrl_box)
 
+        # ── 5. Lockdown Control Panel ──────────────────────────────────
+        lbl_lockdown = QLabel("LOCKDOWN CONTROL PANEL", self)
+        lbl_lockdown.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {Colors.TEXT_SECONDARY}; letter-spacing: 1px;")
+        layout.addWidget(lbl_lockdown)
+
+        lockdown_frame = QFrame(self)
+        lockdown_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_CARD};
+                border: 1px solid {Colors.BORDER_DEFAULT};
+                border-radius: 12px;
+                padding: 16px;
+            }}
+        """)
+        ld_layout = QVBoxLayout(lockdown_frame)
+        ld_layout.setContentsMargins(14, 14, 14, 14)
+        ld_layout.setSpacing(14)
+
+        # Device Name
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Device Name:"))
+        self.txt_device_name = QLineEdit(self)
+        self.txt_device_name.setPlaceholderText("Enter new device name...")
+        name_row.addWidget(self.txt_device_name, stretch=1)
+        btn_get_name = QPushButton("Get", self)
+        btn_get_name.clicked.connect(self._get_device_name)
+        name_row.addWidget(btn_get_name)
+        btn_set_name = QPushButton("Set", self)
+        btn_set_name.clicked.connect(self._set_device_name)
+        name_row.addWidget(btn_set_name)
+        ld_layout.addLayout(name_row)
+
+        # Info Grid
+        info_grid = QGridLayout()
+        info_grid.setSpacing(8)
+
+        info_grid.addWidget(QLabel("Date:"), 0, 0)
+        self.lbl_date = QLabel("Unknown", self)
+        self.lbl_date.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+        info_grid.addWidget(self.lbl_date, 0, 1)
+
+        info_grid.addWidget(QLabel("Language:"), 1, 0)
+        self.lbl_language = QLabel("Unknown", self)
+        self.lbl_language.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+        info_grid.addWidget(self.lbl_language, 1, 1)
+
+        info_grid.addWidget(QLabel("Locale:"), 2, 0)
+        self.lbl_locale = QLabel("Unknown", self)
+        self.lbl_locale.setStyleSheet(f"color: {Colors.TEXT_PRIMARY};")
+        info_grid.addWidget(self.lbl_locale, 2, 1)
+
+        info_box = QFrame(self)
+        info_box.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_SURFACE};
+                border: 1px solid {Colors.BORDER_SUBTLE};
+                border-radius: 8px;
+                padding: 8px;
+            }}
+        """)
+        info_btn_layout = QHBoxLayout(info_box)
+        info_btn_layout.setContentsMargins(8, 4, 8, 4)
+        btn_refresh_info = QPushButton("Refresh Info", self)
+        btn_refresh_info.clicked.connect(self._refresh_info)
+        info_btn_layout.addWidget(btn_refresh_info)
+        info_grid.addWidget(info_box, 0, 2, 3, 1)
+
+        ld_layout.addLayout(info_grid)
+
+        # Toggles
+        toggles_row = QHBoxLayout()
+        self.chk_assistive = QCheckBox("Assistive Touch", self)
+        self.chk_assistive.clicked.connect(self._toggle_assistive_touch)
+        toggles_row.addWidget(self.chk_assistive)
+
+        self.chk_wifi = QCheckBox("WiFi Connections", self)
+        self.chk_wifi.clicked.connect(self._toggle_wifi)
+        toggles_row.addWidget(self.chk_wifi)
+
+        toggles_box = QFrame(self)
+        toggles_box.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_SURFACE};
+                border: 1px solid {Colors.BORDER_SUBTLE};
+                border-radius: 8px;
+                padding: 8px;
+            }}
+        """)
+        toggles_btn_layout = QHBoxLayout(toggles_box)
+        toggles_btn_layout.setContentsMargins(8, 4, 8, 4)
+        btn_read_toggles = QPushButton("Read States", self)
+        btn_read_toggles.clicked.connect(self._read_toggles)
+        toggles_btn_layout.addWidget(btn_read_toggles)
+        toggles_row.addWidget(toggles_box)
+        toggles_row.addStretch()
+        ld_layout.addLayout(toggles_row)
+
+        # Toggle status output
+        self.lbl_toggle_status = QLabel("wifi: unknown | assistive: unknown", self)
+        self.lbl_toggle_status.setStyleSheet(f"font-family: 'JetBrains Mono', 'Consolas', monospace; font-size: 11px; color: {Colors.TEXT_SECONDARY};")
+        ld_layout.addWidget(self.lbl_toggle_status)
+
+        # Battery & Activation
+        bottom_row = QHBoxLayout()
+
+        battery_box = QFrame(self)
+        battery_box.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_SURFACE};
+                border: 1px solid {Colors.BORDER_SUBTLE};
+                border-radius: 8px;
+                padding: 8px;
+            }}
+        """)
+        battery_btn_layout = QHBoxLayout(battery_box)
+        battery_btn_layout.setContentsMargins(8, 4, 8, 4)
+        btn_battery = QPushButton("Get Battery Info", self)
+        btn_battery.clicked.connect(self._get_battery)
+        battery_btn_layout.addWidget(btn_battery)
+        bottom_row.addWidget(battery_box)
+
+        activation_box = QFrame(self)
+        activation_box.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_SURFACE};
+                border: 1px solid {Colors.BORDER_SUBTLE};
+                border-radius: 8px;
+                padding: 8px;
+            }}
+        """)
+        activation_btn_layout = QHBoxLayout(activation_box)
+        activation_btn_layout.setContentsMargins(8, 4, 8, 4)
+        btn_activation = QPushButton("Check Activation", self)
+        btn_activation.clicked.connect(self._check_activation)
+        activation_btn_layout.addWidget(btn_activation)
+        bottom_row.addWidget(activation_box)
+
+        self.lbl_activation = QLabel("Status: Not Checked", self)
+        self.lbl_activation.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
+        bottom_row.addWidget(self.lbl_activation)
+        bottom_row.addStretch()
+        ld_layout.addLayout(bottom_row)
+
+        # Battery text
+        self.battery_text = QTextBrowser(self)
+        self.battery_text.setMaximumHeight(100)
+        self.battery_text.setStyleSheet(f"""
+            QTextBrowser {{
+                background-color: {Colors.BG_SURFACE};
+                border: 1px solid {Colors.BORDER_DEFAULT};
+                border-radius: 8px;
+                padding: 8px;
+                font-family: 'JetBrains Mono', 'Consolas', monospace;
+                font-size: 11px;
+            }}
+        """)
+        self.battery_text.setPlaceholderText("Click 'Get Battery Info' to view battery details...")
+        ld_layout.addWidget(self.battery_text)
+
+        layout.addWidget(lockdown_frame)
+
         layout.addStretch()
         scroll.setWidget(content_widget)
 
@@ -366,3 +528,252 @@ class DeviceView(QWidget):
         worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
         worker.start()
         self._set_buttons_enabled(False)
+
+    def _get_lockdown_ops(self) -> LockdownOps | None:
+        udid = self._get_udid()
+        if not udid:
+            return None
+        return LockdownOps(udid)
+
+    def _get_device_name(self):
+        ops = self._get_lockdown_ops()
+        if not ops:
+            return
+
+        class _Worker(QThread):
+            finished = Signal(bool, str)
+            def __init__(self, ops):
+                super().__init__()
+                self.ops = ops
+            def run(self):
+                try:
+                    name = asyncio.run(self.ops.get_device_name())
+                    self.finished.emit(True, name)
+                except Exception as e:
+                    self.finished.emit(False, str(e))
+
+        worker = _Worker(ops)
+        worker.finished.connect(lambda ok, name: self.txt_device_name.setText(name) if ok else QMessageBox.critical(self, "Error", name))
+        self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        worker.start()
+
+    def _set_device_name(self):
+        ops = self._get_lockdown_ops()
+        if not ops:
+            return
+        name = self.txt_device_name.text().strip()
+        if not name:
+            QMessageBox.warning(self, "No Name", "Please enter a device name.")
+            return
+
+        class _Worker(QThread):
+            finished = Signal(bool, str)
+            def __init__(self, ops, name):
+                super().__init__()
+                self.ops = ops
+                self.name = name
+            def run(self):
+                try:
+                    msg = asyncio.run(self.ops.set_device_name(self.name))
+                    self.finished.emit(True, msg)
+                except Exception as e:
+                    self.finished.emit(False, str(e))
+
+        worker = _Worker(ops, name)
+        worker.finished.connect(lambda ok, msg: QMessageBox.information(self, "Result", msg) if ok else QMessageBox.critical(self, "Error", msg))
+        self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        worker.start()
+
+    def _refresh_info(self):
+        ops = self._get_lockdown_ops()
+        if not ops:
+            return
+
+        class _Worker(QThread):
+            finished = Signal(bool, str, str, str)
+            def __init__(self, ops):
+                super().__init__()
+                self.ops = ops
+            def run(self):
+                async def _fetch():
+                    return await asyncio.gather(
+                        self.ops.get_date(),
+                        self.ops.get_language(),
+                        self.ops.get_locale(),
+                    )
+                try:
+                    date, lang, locale = asyncio.run(_fetch())
+                    self.finished.emit(True, date, lang, locale)
+                except Exception as e:
+                    self.finished.emit(False, str(e), "", "")
+
+        worker = _Worker(ops)
+        worker.finished.connect(self._on_info_refreshed)
+        self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        worker.start()
+
+    def _on_info_refreshed(self, ok, date, lang, locale):
+        if ok:
+            self.lbl_date.setText(date)
+            self.lbl_language.setText(lang)
+            self.lbl_locale.setText(locale)
+        else:
+            QMessageBox.critical(self, "Error", date)
+
+    def _read_toggles(self):
+        ops = self._get_lockdown_ops()
+        if not ops:
+            return
+
+        class _Worker(QThread):
+            finished = Signal(bool, bool, object)
+            def __init__(self, ops):
+                super().__init__()
+                self.ops = ops
+            def run(self):
+                try:
+                    at = asyncio.run(self.ops.get_assistive_touch())
+                    wifi = asyncio.run(self.ops.get_wifi_connections())
+                    self.finished.emit(True, at, wifi)
+                except Exception:
+                    self.finished.emit(False, False, False)
+
+        worker = _Worker(ops)
+        worker.finished.connect(self._on_toggles_read)
+        self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        worker.start()
+
+    def _on_toggles_read(self, ok, at, wifi):
+        if ok:
+            self.chk_assistive.setChecked(at)
+            conn_type = self.current_device_info.get("Connection", "")
+            if wifi is not None:
+                wifi_str = "on" if wifi else "off"
+                self.chk_wifi.setChecked(wifi)
+                self.chk_wifi.setEnabled(True)
+            elif conn_type == "Wi-Fi":
+                wifi_str = "on"
+                self.chk_wifi.setChecked(True)
+                self.chk_wifi.setEnabled(True)
+            else:
+                wifi_str = "off"
+                self.chk_wifi.setChecked(False)
+                self.chk_wifi.setEnabled(False)
+            at_str = "on" if at else "off"
+            self.lbl_toggle_status.setText(f"wifi: {wifi_str} | assistive: {at_str}")
+
+    def _toggle_assistive_touch(self):
+        ops = self._get_lockdown_ops()
+        if not ops:
+            return
+        state = self.chk_assistive.isChecked()
+
+        class _Worker(QThread):
+            finished = Signal(bool, str)
+            def __init__(self, ops, state):
+                super().__init__()
+                self.ops = ops
+                self.state = state
+            def run(self):
+                try:
+                    msg = asyncio.run(self.ops.set_assistive_touch(self.state))
+                    self.finished.emit(True, msg)
+                except Exception as e:
+                    self.finished.emit(False, str(e))
+
+        worker = _Worker(ops, state)
+        worker.finished.connect(lambda ok, msg: QMessageBox.information(self, "Result", msg) if ok else QMessageBox.critical(self, "Error", msg))
+        self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        worker.start()
+
+    def _toggle_wifi(self):
+        ops = self._get_lockdown_ops()
+        if not ops:
+            return
+        state = self.chk_wifi.isChecked()
+
+        class _Worker(QThread):
+            finished = Signal(bool, str)
+            def __init__(self, ops, state):
+                super().__init__()
+                self.ops = ops
+                self.state = state
+            def run(self):
+                try:
+                    msg = asyncio.run(self.ops.set_wifi_connections(self.state))
+                    self.finished.emit(True, msg)
+                except Exception as e:
+                    self.finished.emit(False, str(e))
+
+        worker = _Worker(ops, state)
+        worker.finished.connect(lambda ok, msg: QMessageBox.information(self, "Result", msg) if ok else QMessageBox.critical(self, "Error", msg))
+        self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        worker.start()
+
+    def _get_battery(self):
+        ops = self._get_lockdown_ops()
+        if not ops:
+            return
+
+        class _Worker(QThread):
+            finished = Signal(bool, str)
+            def __init__(self, ops):
+                super().__init__()
+                self.ops = ops
+            def run(self):
+                try:
+                    info = asyncio.run(self.ops.get_battery_info())
+                    if info:
+                        text = "Battery Information:\n" + "-" * 30 + "\n"
+                        for k, v in info.items():
+                            text += f"{k}: {v}\n"
+                        self.finished.emit(True, text)
+                    else:
+                        self.finished.emit(False, "No battery information available.")
+                except Exception as e:
+                    self.finished.emit(False, str(e))
+
+        worker = _Worker(ops)
+        worker.finished.connect(lambda ok, text: self.battery_text.setPlainText(text) if ok else QMessageBox.critical(self, "Error", text))
+        self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        worker.start()
+
+    def _check_activation(self):
+        ops = self._get_lockdown_ops()
+        if not ops:
+            return
+
+        class _Worker(QThread):
+            finished = Signal(bool, str)
+            def __init__(self, ops):
+                super().__init__()
+                self.ops = ops
+            def run(self):
+                try:
+                    state = asyncio.run(self.ops.get_activation_state())
+                    self.finished.emit(True, state)
+                except Exception as e:
+                    self.finished.emit(False, str(e))
+
+        worker = _Worker(ops)
+        worker.finished.connect(self._on_activation_checked)
+        self._workers.append(worker)
+        worker.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
+        worker.start()
+
+    def _on_activation_checked(self, ok, state):
+        if ok:
+            is_activated = state == "Activated"
+            color = Colors.SUCCESS if is_activated else Colors.DANGER
+            self.lbl_activation.setText(f"Status: {state}")
+            self.lbl_activation.setStyleSheet(f"color: {color};")
+        else:
+            self.lbl_activation.setText(f"Status: Error - {state}")
+            self.lbl_activation.setStyleSheet(f"color: {Colors.DANGER};")

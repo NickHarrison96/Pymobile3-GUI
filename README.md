@@ -14,12 +14,13 @@ A native-feel PySide6 desktop application for Windows 10/11 with Mica/Acrylic ba
 
 ## Features
 
-- **Device Overview** — Hardware specs, battery, activation state, developer mode status
-- **Files & Applications** — AFC file browser, installed apps inspector, DCIM media quick access
+- **Device Overview** — Hardware specs, battery, activation state, developer mode status + lockdown control panel (rename, assistive touch, Wi-Fi connections, battery detail)
+- **Files & Applications** — AFC file browser, installed apps inspector, DCIM media quick access, crash reports explorer (browse, parse, export, pull)
 - **Forensic Acquisition** — Logical, Logical+, PRFS modes with live progress, case metadata, TAR archiving
-- **Developer Tools** — Progressive readiness pipeline (Dev Mode → DDI → RSD Tunnel) + DVT instruments (Process Monitor, Screenshot, GPS Simulation)
-- **Recovery & Restore** — IPSW firmware flashing via `idevicerestore` + interactive Recovery/DFU hardware guides
+- **Developer Tools** — Progressive readiness pipeline (Dev Mode → DDI → RSD Tunnel) + DVT instruments (process monitor with search/kill/launch, bundle-id lookup, system monitor, screenshot, GPS simulation)
+- **Recovery & Restore** — IPSW firmware flashing via `idevicerestore`, iTunes-style backup restore (with encrypted-backup password support), interactive Recovery/DFU hardware guides
 - **Live Syslog** — Streaming console with filtering, pause/resume, export
+- **SSH Ramdisk** — checkm8 ramdisk create/boot for A7-A11 & T2 devices, device erase, on-board SHSH dump, SSH console
 
 ## Requirements
 
@@ -31,11 +32,11 @@ A native-feel PySide6 desktop application for Windows 10/11 with Mica/Acrylic ba
 
 ```bash
 git clone <repo-url>
-cd pymobile3_gui
+cd Pymobile3-GUI
 python -m venv .venv
 .venv\Scripts\activate      # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-python main.py
+python -m pymobile3_gui.main
 ```
 
 ## Building Standalone Executable (Windows)
@@ -55,6 +56,7 @@ pymobile3_gui/
 ├── core/
 │   ├── device_poller.py       # Async usbmux/lockdown device discovery
 │   ├── task_manager.py        # Centralized long-running task orchestration
+│   ├── process_manager.py     # Single-instance enforcement + child process cleanup
 │   └── backend/
 │       ├── backup_engine.py   # Forensic acquisition (Logical/Logical+/PRFS)
 │       ├── tunnel_manager.py  # iOS 17+ RSD tunnel (tunneld lifecycle)
@@ -78,6 +80,23 @@ iOS 17+ moved all developer services (DVT instruments, proclist, screenshot, loc
 3. **Start Tunnel** — Launches `pymobiledevice3 remote tunneld` elevated
 
 When "Developer services" reads green, DVT tabs are functional.
+
+## SSH Ramdisk (checkm8 Devices)
+
+The **SSH Ramdisk** tab in Recovery & Restore ports [SSHRD_Script](https://github.com/verygenericname/SSHRD_Script) into the GUI for A7-A11 and T2 devices (CPID `0x8960`/`0x7000`/`0x7001`/`0x8000`/`0x8003`/`0x8010`/`0x8011`/`0x8012`/`0x8015`):
+
+- **Create** — build a ramdisk from a signed IPSW (ipsw.me version lookup, partial downloads via `pzb`)
+- **Boot / Erase / Reboot** — checkm8 pwn via gaster, bootchain delivery via irecovery
+- **Dump SHSH Blobs** — read on-board blobs over SSH (iproxy + paramiko)
+- **Open SSH Console** — root shell at `localhost:2222` while the ramdisk runs
+
+Requirements:
+
+- **WSL (Ubuntu)** — build steps run the bundled Linux tools (`img4`, `img4tool`, `hfsplus`, `pzb`, `iBoot64Patcher`, ...) inside WSL; DFU/USB steps run natively on Windows through the vendored exes in `assets/sshrd/win/`
+- **DFU mode** with a WinUSB/libusbk driver (Zadig) on the Apple DFU device
+- iOS **16.0 or older** for the build step (upstream `sshrd.sh` Linux branch refuses 16.1+)
+
+All binaries, SHSH blobs and payload tars are vendored in `pymobile3_gui/assets/sshrd/` — only IPSW firmware parts are downloaded, on first build. Run the offline test suite with `pytest`.
 
 ## License
 

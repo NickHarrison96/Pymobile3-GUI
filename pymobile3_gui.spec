@@ -36,6 +36,9 @@ datas = [
     # UI assets: fonts, icons
     (str(ASSETS_DIR / "fonts"), "assets/fonts"),
     (str(ASSETS_DIR / "icons"), "assets/icons"),
+    # SSH ramdisk tool: bundled Linux/Windows binaries, SHSH blobs, sshtars,
+    # licenses (resource_path("assets", "sshrd") resolves under _MEIPASS)
+    (str(ASSETS_DIR / "sshrd"), "assets/sshrd"),
 ]
 
 # -----------------------------------------------------------------------------
@@ -102,6 +105,10 @@ for _pkg in (
     "requests",
     "packaging",
     "pygments",
+    # SSH ramdisk: paramiko's crypto backends and pyusb's backend module are
+    # imported inside functions, so collect them wholesale.
+    "paramiko",
+    "usb",
 ):
     try:
         hiddenimports += collect_submodules(_pkg)
@@ -130,7 +137,9 @@ excludes = [
     "matplotlib",
     "scipy",
     "pandas",
-    "PIL",
+    # NOTE: PIL must NOT be excluded — pymobiledevice3's webinspector
+    # (cdp_screencast) does `from PIL import Image` at module import, and the
+    # CLI dispatcher dynamically imports every command group.
     "pytest",
     "xmlrpc",
 ]
@@ -177,10 +186,8 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="Pymobile3-GUI",
     debug=False,
     bootloader_ignore_signals=False,
