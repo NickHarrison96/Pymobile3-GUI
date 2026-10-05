@@ -149,13 +149,13 @@ pymobile3_gui/
 
 ## Known Gaps (from docs/TODO.md)
 
-These features exist in RootForgeKit but have not been ported yet:
-- Backup restore-to-device (restore path, not just IPSW flashing)
+One feature gap from RootForgeKit remains unported:
 - Frozen binary verification (PyInstaller build not yet tested end-to-end)
 
-Ported and verified: lockdown control panel, crash reports explorer, DVT
-instruments (kill/launch/sysmon/power assertion — the last is unavailable on
-iOS 26.5, which no longer exposes the arbitration service), `keep_intermediate`.
+Ported and verified: lockdown control panel, crash reports explorer, backup
+restore-to-device, DVT instruments (kill/launch/sysmon/power assertion — the
+last is unavailable on iOS 26.5, which no longer exposes the arbitration
+service), `keep_intermediate`.
 
 ## Code Style
 

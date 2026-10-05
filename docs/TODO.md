@@ -87,21 +87,26 @@ Notes:
 - Text commands (launch/kill/arbitration) run with `include_stderr=True` and
   treat `\bERROR\b` as failure — same exit-0 trap as the mount flow.
 
-### 1.4 Backup restore
+### 1.4 Backup restore — **done**
 
-`views/restore_view.py` is IPSW-only (`idevicerestore`). Restoring an
-iTunes-style backup **to** the device is absent.
+`views/restore_view.py` gained a "Backup Restore" tab (folder picker,
+encrypted-backup password field, reboot toggle) routed through TaskManager
+like acquisition:
 
-| Operation | Command | Original handler |
+| Operation | Command | Where |
 |---|---|---|
-| Restore backup | `backup2 restore <dir>` | `_start_restore` (:248) |
+| Restore backup | `backup2 restore <parent> [--source udid]` | `restore_backup()` in `core/backend/backup_engine.py` |
 
-Source: `components/ios/backup_restore_dialog.py` (281 lines) — the "Create
-Backup / Restore Backup" mode switch at `_on_mode_changed` (:192).
-
-The backup half is already ported and improved here (`backup_engine.py`); only
-the restore path is missing. It should route through `TaskManager` like
-acquisition does, not the original's inline runner.
+Implementation notes:
+- `resolve_backup_source()` accepts either the UDID folder itself or its
+  parent (pymobiledevice3 wants the parent; users pick the UDID folder) and
+  pins `--source` so a folder holding several sets still restores the one
+  selected. Missing Manifest.plist → plain-language error, not a stack dump.
+- Streams with no timeout (large restores run for a long time), maps tqdm's
+  percent bar into the 10–95 slice of the dock, masks `--password` in the
+  log, and treats a swallowed traceback as failure even on exit 0.
+- Preflight "Connecting to Device" step: `usbmux list` must show a device;
+  empty/`[]` fails with an unlock/trust hint before any restore starts.
 
 ---
 

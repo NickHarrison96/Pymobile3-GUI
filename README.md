@@ -10,7 +10,7 @@ A native-feel PySide6 desktop application for Windows 10/11 with Mica/Acrylic ba
 - **Files & Applications** — AFC file browser, installed apps inspector, DCIM media quick access, crash reports explorer (browse, parse, export, pull)
 - **Forensic Acquisition** — Logical, Logical+, PRFS modes with live progress, case metadata, TAR archiving
 - **Developer Tools** — Progressive readiness pipeline (Dev Mode → DDI → RSD Tunnel) + DVT instruments (process monitor with search/kill/launch, bundle-id lookup, system monitor, screenshot, GPS simulation)
-- **Recovery & Restore** — IPSW firmware flashing via `idevicerestore` + interactive Recovery/DFU hardware guides
+- **Recovery & Restore** — IPSW firmware flashing via `idevicerestore`, iTunes-style backup restore (with encrypted-backup password support), interactive Recovery/DFU hardware guides
 - **Live Syslog** — Streaming console with filtering, pause/resume, export
 - **SSH Ramdisk** *(in development)* — checkm8 ramdisk creation and boot for A7-A11 devices
 

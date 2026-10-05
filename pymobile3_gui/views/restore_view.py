@@ -5,6 +5,7 @@ Recovery Mode and DFU Mode hardware wizards.
 """
 
 import os
+import json
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QFrame, QCheckBox, QFileDialog, QTabWidget,
@@ -15,6 +16,10 @@ from PySide6.QtGui import QCursor
 from pymobile3_gui.ui.theme import Colors
 from pymobile3_gui.core.task_manager import TaskManager
 from pymobile3_gui.core.backend.resource_manager import safe_run_command
+from pymobile3_gui.core.backend.paths import pmd3_cmd, backups_dir
+from pymobile3_gui.core.backend.backup_engine import (
+    resolve_backup_source, restore_backup
+)
 
 
 class RestoreView(QWidget):
@@ -60,6 +65,21 @@ class RestoreView(QWidget):
             }}
         """)
 
+        primary_btn_qss = f"""
+            QPushButton {{
+                background-color: {Colors.ACCENT_PRIMARY};
+                color: #ffffff;
+                border: 1px solid #3b82f6;
+                border-radius: 8px;
+                padding: 10px 24px;
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.ACCENT_PRIMARY_HOVER};
+            }}
+        """
+
         # ── Tab 1: IPSW Restore ──────────────────────────────────────
         ipsw_tab = QWidget()
         ipsw_layout = QVBoxLayout(ipsw_tab)
@@ -103,25 +123,81 @@ class RestoreView(QWidget):
 
         btn_flash = QPushButton("⚡ Begin IPSW Firmware Restore", self)
         btn_flash.setCursor(QCursor(Qt.PointingHandCursor))
-        btn_flash.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.ACCENT_PRIMARY};
-                color: #ffffff;
-                border: 1px solid #3b82f6;
-                border-radius: 8px;
-                padding: 10px 24px;
-                font-size: 13px;
-                font-weight: 700;
-            }}
-            QPushButton:hover {{
-                background-color: {Colors.ACCENT_PRIMARY_HOVER};
-            }}
-        """)
+        btn_flash.setStyleSheet(primary_btn_qss)
         btn_flash.clicked.connect(self._start_ipsw_restore)
         ipsw_layout.addWidget(btn_flash)
         ipsw_layout.addStretch()
 
         self.tabs.addTab(ipsw_tab, "⚡ IPSW Restore")
+
+        # ── Tab 2: Backup Restore ─────────────────────────────────────
+        backup_tab = QWidget()
+        backup_layout = QVBoxLayout(backup_tab)
+        backup_layout.setContentsMargins(8, 8, 8, 8)
+        backup_layout.setSpacing(14)
+
+        lbl_bk_desc = QLabel(
+            "Restore an iTunes/Finder-style backup to the connected device "
+            "using mobilebackup2 — no firmware reflash involved.", self)
+        lbl_bk_desc.setStyleSheet(f"font-size: 12px; color: {Colors.TEXT_SECONDARY};")
+        backup_layout.addWidget(lbl_bk_desc)
+
+        bk_card = QFrame(self)
+        bk_card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.BG_CARD};
+                border: 1px solid {Colors.BORDER_DEFAULT};
+                border-radius: 10px;
+                padding: 14px;
+            }}
+        """)
+        bk_v = QVBoxLayout(bk_card)
+        bk_v.setSpacing(10)
+
+        lbl_bk_folder = QLabel("Backup Folder:")
+        lbl_bk_folder.setStyleSheet("font-weight: 600; font-size: 12px;")
+        bk_v.addWidget(lbl_bk_folder)
+
+        bk_browse_row = QHBoxLayout()
+        self.txt_backup_dir = QLineEdit(self)
+        self.txt_backup_dir.setText(backups_dir())
+        self.txt_backup_dir.setPlaceholderText(
+            "Folder containing the <UDID> backup set...")
+        bk_browse_row.addWidget(self.txt_backup_dir, stretch=1)
+        btn_browse_bk = QPushButton("Browse...", self)
+        btn_browse_bk.clicked.connect(self._browse_backup_dir)
+        bk_browse_row.addWidget(btn_browse_bk)
+        bk_v.addLayout(bk_browse_row)
+
+        opt_row = QHBoxLayout()
+        lbl_pw = QLabel("Password:")
+        lbl_pw.setStyleSheet("font-size: 12px;")
+        opt_row.addWidget(lbl_pw)
+        self.txt_backup_password = QLineEdit(self)
+        self.txt_backup_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.txt_backup_password.setPlaceholderText("Encrypted backups only")
+        opt_row.addWidget(self.txt_backup_password, stretch=1)
+        self.chk_reboot = QCheckBox("Reboot when done", self)
+        self.chk_reboot.setChecked(True)
+        opt_row.addWidget(self.chk_reboot)
+        bk_v.addLayout(opt_row)
+
+        backup_layout.addWidget(bk_card)
+
+        lbl_bk_warn = QLabel(
+            "⚠ Restoring overwrites data on the device. Keep it unlocked and connected.",
+            self)
+        lbl_bk_warn.setStyleSheet(f"font-size: 12px; color: #fca5a5;")
+        backup_layout.addWidget(lbl_bk_warn)
+
+        btn_backup_restore = QPushButton("⚡ Begin Backup Restore", self)
+        btn_backup_restore.setCursor(QCursor(Qt.PointingHandCursor))
+        btn_backup_restore.setStyleSheet(primary_btn_qss)
+        btn_backup_restore.clicked.connect(self._start_backup_restore)
+        backup_layout.addWidget(btn_backup_restore)
+        backup_layout.addStretch()
+
+        self.tabs.addTab(backup_tab, "📤 Backup Restore")
 
         # ── Tab 2: Recovery Mode Guide ───────────────────────────────
         rec_tab = QWidget()
@@ -207,6 +283,79 @@ class RestoreView(QWidget):
         f, _ = QFileDialog.getOpenFileName(self, "Select Apple IPSW Firmware File", "", "IPSW Files (*.ipsw)")
         if f:
             self.txt_ipsw_path.setText(f)
+
+    def _browse_backup_dir(self):
+        d = QFileDialog.getExistingDirectory(
+            self, "Select Backup Folder",
+            self.txt_backup_dir.text().strip() or backups_dir())
+        if d:
+            self.txt_backup_dir.setText(d)
+
+    def _start_backup_restore(self):
+        folder = self.txt_backup_dir.text().strip()
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.warning(self, "Missing Folder", "Please select a valid backup folder.")
+            return
+
+        password = self.txt_backup_password.text()
+        reboot = self.chk_reboot.isChecked()
+
+        reply = QMessageBox.question(
+            self, "Confirm Backup Restore",
+            "Restoring overwrites data on the connected device.\n\n"
+            f"Backup: {folder}\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        def run_job(progress_cb, log_cb, is_cancelled_cb):
+            progress_cb(2, step="Validating Backup", detail=folder)
+            try:
+                target, source = resolve_backup_source(folder)
+            except ValueError as e:
+                raise Exception(str(e))
+            log_cb(f"Backup set: {source or 'auto-detect (connected device)'}")
+
+            progress_cb(6, step="Connecting to Device", detail="Querying usbmux for a device...")
+            ok, out = safe_run_command(
+                pmd3_cmd(["usbmux", "list"]), timeout=15, include_stderr=True)
+            devices = []
+            # Combined output may carry log lines around the JSON — bracket
+            # extraction keeps the parse honest either way.
+            start, end = out.find("["), out.rfind("]")
+            if ok and 0 <= start < end:
+                try:
+                    devices = json.loads(out[start:end + 1])
+                except ValueError:
+                    devices = []
+            if not isinstance(devices, list) or not devices:
+                raise Exception(
+                    "No iOS device is visible over USB. Connect and unlock "
+                    "the device, accept the trust prompt, then retry.")
+            log_cb(f"Device visible ({len(devices)} usbmux entries).")
+
+            progress_cb(10, step="Restoring Backup", detail="Starting mobilebackup2 restore...")
+            restore_backup(
+                target, password=password, reboot=reboot, source=source,
+                base=10, span=85,
+                progress_cb=progress_cb, log_cb=log_cb,
+                is_cancelled_cb=is_cancelled_cb,
+            )
+            progress_cb(100, step="Finalizing", detail="Restore completed.")
+
+        tm = TaskManager.instance()
+        tm.start_task(
+            task_id="backup_restore_" + str(os.getpid()),
+            title="Backup Restore",
+            subtitle=folder,
+            steps=["Validating Backup", "Connecting to Device", "Restoring Backup", "Finalizing"],
+            worker_fn=run_job
+        )
+        QMessageBox.information(
+            self, "Restore Queued",
+            "Backup restore initiated.\nTrack progress in the bottom operation dock.")
 
     def _start_ipsw_restore(self):
         path = self.txt_ipsw_path.text().strip()
