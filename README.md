@@ -46,7 +46,7 @@ pip install pyinstaller
 python -m PyInstaller pymobile3_gui.spec --noconfirm
 ```
 
-Produces `dist/Pymobile3-GUI/Pymobile3-GUI.exe` (onedir bundle).
+Produces `dist_pymobile3/Pymobile3-GUI/Pymobile3-GUI.exe` (onedir bundle).
 
 ## Architecture
 
@@ -64,6 +64,7 @@ pymobile3_gui/
 │       ├── paths.py           # Frozen-aware path resolution
 │       ├── elevation.py       # UAC/admin helpers
 │       ├── process_runner.py  # QProcess streaming runner
+│       ├── ramdisk_manager.py # SSH ramdisk tool (SSHRD_Script port)
 │       └── resource_manager.py# Thread pool, subprocess, crash handler
 ├── views/                     # Full-page workspaces (6 views)
 ├── ui/                        # Reusable widgets (sidebar, dock, drawer, theme)

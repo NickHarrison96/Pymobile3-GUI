@@ -160,9 +160,29 @@ pymobile3_gui/
 - **pzb exits 0 on failure** — `_pzb_fetch()` checks the output file exists
   and is non-empty before believing it; keep that check if you add fetches.
 
+### Hardening pass (2026-10-05) — defects a whole-tree review surfaced
+- **Qt on Windows 10 does not install a dark palette.** `colorScheme()` reports
+  `Dark` while `palette().Window` stays `#f0f0f0`, so a `QMessageBox` draws a
+  light background under light QSS text (invisible). The fix in `main()` is all
+  three of: `styleHints().setColorScheme(Dark)`, `setPalette(get_application_palette())`,
+  and `QDialog, QMessageBox { background-color: ... }` in the stylesheet.
+- **No `closeEvent`/`aboutToQuit` = closing destroys live threads.** A half-written
+  forensic backup is lost and children (incl. the elevated tunneld) are orphaned.
+  `MainWindow.shutdown()` cancels and waits for tasks, the poller and the tunnel.
+- **`usb_reset` must never drop `idVendor=0x05AC`.** The "any Apple device"
+  fallback used to clear the vendor filter and could reset a user's own mouse.
+  Widen product ids, never the vendor.
+- **The spec built onefile *inside* onedir** (`EXE` without
+  `exclude_binaries=True`) — double disk use plus full `%TEMP%` re-extraction
+  every launch. Keep `exclude_binaries=True` on `EXE`.
+- **A `QProcess` must not run inside a TaskManager worker thread** — that thread
+  has no event loop, so queued `finished`/`readyRead` never arrive. Long ops that
+  stream output use `subprocess.Popen` directly (`restore_backup`, `run_restore`,
+  `run_streaming`); `StreamingProcessRunner` is only for event-loop threads.
+
 ## Active Development
 
-### SSH Ramdisk (branch: `feature/sshrd-ramdisk`) — implemented, untested on hardware
+### SSH Ramdisk — implemented, merged to `master`, untested on hardware
 - Ports SSHRD_Script (checkm8, A7-A11/T2) into the GUI:
   - `core/backend/ramdisk_manager.py` — `op_create`, `op_boot`, `op_reset`,
     `op_reboot`, `op_dump_blobs`, `op_clean`, `open_ssh_console`; failures

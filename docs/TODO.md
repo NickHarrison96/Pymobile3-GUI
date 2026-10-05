@@ -169,7 +169,7 @@ Implementation notes:
 
 ---
 
-## 4. Full-project code review & hardening (2026-10-05)
+## 4. Full-project code review & hardening (2026-10-05, merged to master)
 
 A whole-tree review (core, views, main+ui+packaging) turned up stability and
 durability defects beyond the feature port. Fixed in one pass:
