@@ -243,7 +243,7 @@ Recorded so nobody re-investigates them as extraction bugs:
 ## 6. Roadmap — Legacy iOS Kit feature parity
 
 Added 2026-10-05. Source: `C:\Users\nick\Documents\GitHub\Legacy-iOS-Kit`
-(`restore.sh`, 12,600 lines / 200 functions / GPL-3.0). Provenance, licensing
+(`restore.sh`, 11,907 lines / 200 functions / GPL-3.0). Provenance, licensing
 constraints and the per-tool binary inventory are in `docs/REFERENCES.md` —
 **read that section before touching anything here.**
 
@@ -269,127 +269,166 @@ constraints and the per-tool binary inventory are in `docs/REFERENCES.md` —
 - Step lists live next to the ops (`CREATE_STEPS`, `BOOT_STEPS`, ...) and the
   worker's `step=` strings must match exactly — see AGENTS.md.
 
-### 6.1 Capability database — prerequisite for everything else
+### 6.0.1 The block contract
+
+Every block below is executed in the same loop: **implement → offline tests →
+`pytest` green → update status → one commit → push.** Precisely:
+
+1. Put logic in the right module (`device_db.py` / `legacy_*.py`), a reusable
+   widget in `ui/`, a page or tab in `views/`.
+2. Add **offline** tests in `tests/` — assert *constructed argv* with the runner
+   stubbed; never a device, network, or WSL. This is the pattern that caught the
+   `wsl_arg` and `paths.app_dir()` bugs.
+3. Run `python -m pytest -q` — must be green (baseline: 231 passed at 2026-10-05).
+4. Tick this block's `[x]` and update its status line; touch `AGENTS.md` only
+   when a whole phase's status changes.
+5. One commit, imperative subject (e.g. `Add device_db HardwareModel↔ProductType
+   map`), then push. Move to the next block.
+6. Blocks marked **HW** additionally need a manual gate before closing:
+   "verified on `<model>` / iOS `<ver>`".
+
+### 6.0.2 Block index (execution order)
+
+| # | Block | Phase | HW |
+|---|---|---|---|
+| B0 | Add MIT `LICENSE` | §3 | no |
+| B1a | HardwareModel ↔ ProductType map | 6.1 | no |
+| B1b | Processor generation (`device_proc` 1–11) | 6.1 | no |
+| B1c | Signed-target + latest version matrix | 6.1 | no |
+| B1d | Baseband name + SHA1 | 6.1 | no |
+| B1e | Activation / powdersn0w / DRA-v6 eligibility | 6.1 | no |
+| B1f | `device_get_info` ECID/UDID/build/mode parsers | 6.1 | no |
+| B2 | Version-update check | 6.6 | no |
+| B3 | App list user/system/all | 6.6 | no |
+| B4 | Install IPA | 6.6 | no |
+| B5 | Backup encryption on/off/change | 6.6 | no |
+| B6 | Erase all content and settings | 6.6 | no |
+| B7 | Pair device | 6.6 | no |
+| B8 | Activate via `ideviceactivation` | 6.6 | no |
+| B9 | Export device / battery info | 6.6 | no |
+| B10 | Data management (uicache; sshfs vs SFTP) | 6.6 | no* |
+| B11 | Save OTA blobs | 6.4 | no |
+| B12 | Onboard raw dump + convert | 6.4 | maybe |
+| B13 | Cydia blobs / 64-bit deverser | 6.4 | HW |
+| B14 | Exit recovery + Just Boot/history | 6.2 | HW |
+| B15 | Enter kDFU / pwnDFU / send pwned iBSS | 6.2 | HW |
+| B16 | Per-device DFU helper timer | 6.2 | HW |
+| B17 | 32-bit ramdisk | 6.3 | HW |
+| B18 | iOS 8 ramdisk | 6.3 | HW |
+| B19 | Dump baseband + activation records | 6.3 | HW |
+| B20 | Per-version erase recipes | 6.3 | HW |
+| B21 | NVRAM clear / exploit toggle / datetime | 6.3 | HW |
+| B22 | Bootstrap / untether / OpenSSH | 6.3 | HW |
+| B23 | TrollStore install | 6.3 | HW |
+| B24 | Mount `/var/mobile` (`mount_ich`) | 6.3 | HW |
+| B25+ | Restore / downgrade (split; see §6.5) | 6.5 | HW |
+| B-last | 32-bit jailbreak payloads | 6.7 | HW |
+
+`*` B10 needs a human decision (sshfs side vs. SFTP-backed browser) before it
+can be specified.
+
+### 6.1 Capability database — prerequisite for everything else (`B1a–B1f`)
 
 Every menu in `restore.sh` is gated on device type / processor / mode / iOS
-version. None of that gating exists here, so **this lands first**.
+version. None of that gating exists here, so **this lands first.** Landing spot:
+new `core/backend/device_db.py` — pure data + lookup helpers, with offline unit
+tests in `tests/test_device_db.py`. It keys on **ProductType / HardwareModel**;
+chip/processor *labels* come from the existing `core/backend/device_ident.py`
+(CPID-keyed) — do **not** duplicate that table.
 
-| Data | LIK source | Notes |
-|---|---|---|
-| HardwareModel → ProductType, both directions | `device_get_info` :1367–1529 | ~70 entries. Includes two quirks worth porting verbatim as *data*: iPod touch 4 on iOS 7 reports as `iPhone3,1/3,3` (N81AP override), and iPad2,1 is force-mapped to `k93`. |
-| Processor generation (`device_proc` 1–11) | :1537–1556 | S5L8900=1, A4=4, A5=5, A6=6, A7=7, A8=8, A9=9, A10/A11=10, anything else=11. Also `device_checkm8ipad` for iPad6/7. |
-| Signed-target version per device (`device_use_vers`/`_build`) | :1598–1635 | The OTA-downgrade matrix: 3.1.3/7E18 for iPhone1,1 … 10.3.3/14G60 for A7. |
-| Latest-known version per device | :1636–1657 | Hardcoded, with an ipsw.me fallback. |
-| Baseband to use + its SHA1 | :1673–1703 | Per-device `bbfw` name and digest; `Trek`/`Mav5`/`Mav7Mav8` families. |
-| Activation-record candidacy | :1709–1726 | `9900candidate` (iPhone4,1 / iPhone5,2 / iPad2,7 / iPad3,[26]) and `activationissue` sets, with the auto-enable ladder. |
-| powdersn0w / DRA v6 eligibility | :1734–1750 | `device_can_powder`, `device_can_drav6`. |
-| Manual device entry | `device_entry` :887, `..._s5l8900` :929 | Needed for devices where lockdown reports nothing (iOS 2.x and lower). |
-| ECID (hex→dec), UDID, build, mode detection | `device_get_info` :1225–1320 | Recovery/DFU/ WTF/Normal mode split via `irecovery -q` + `ideviceinfo`. |
+| # | Goal | LIK source | Notes |
+|---|---|---|---|
+| B1a | HardwareModel → ProductType, both directions | `device_get_info` :1367–1529 | ~70 entries. Two quirks port verbatim as *data*: iPod touch 4 on iOS 7 reports as `iPhone3,1/3,3` (N81AP override); iPad2,1 is force-mapped to `k93`. |
+| B1b | Processor generation (`device_proc` 1–11) + `device_checkm8ipad` | :1536–1558 | S5L8900=1, A4=4, A5=5, A6=6, A7=7, A8=8, A9=9, A10/A11=10, else 11. `checkm8ipad` for iPad6/7. |
+| B1c | Signed-target version/build per device + latest-known | :1595–1657 | The OTA-downgrade matrix (3.1.3/7E18 … 10.3.3/14G60). Latest is hardcoded with an ipsw.me fallback — model the fallback behind a seam the tests stub. |
+| B1d | Baseband to use + SHA1 | :1673–1703 | Per-device `bbfw` name and digest; `Trek`/`Mav5`/`Mav7Mav8` families. |
+| B1e | Activation candidacy + powdersn0w / DRA-v6 eligibility | :1709–1750 | `9900candidate` (iPhone4,1 / iPhone5,2 / iPad2,7 / iPad3,[26]) and `activationissue` sets + the auto-enable ladder; `device_can_powder`, `device_can_drav6`. |
+| B1f | ECID (hex→dec), UDID, build, mode detection | `device_get_info` :1225–1320, `device_entry` :887, `..._s5l8900` :929 | Pure parsers only (Recovery/DFU/WTF/Normal split from `irecovery -q` + `ideviceinfo` text). Manual entry covers devices where lockdown reports nothing (iOS ≤2.x). Reuse `ramdisk_manager.parse_device_info`. |
 
-Landing spot: a new `core/backend/device_db.py` — a pure-data table plus
-lookup helpers, with **offline unit tests in `tests/test_device_db.py`** (no
-device needed). This is the highest-value, lowest-risk item in the whole
-roadmap: it is pure data, it is what the UI needs to decide which buttons to
-enable, and every later phase queries it.
-
-### 6.2 Phase 1 — DFU / Recovery mode plumbing
+### 6.2 DFU / Recovery mode plumbing (`B14–B16`)
 
 Everything else assumes the device can be *put into* a mode. Today the app only
 polls for a DFU device; it cannot move one there.
 
-| Feature | LIK | What we have | Needed |
-|---|---|---|---|
-| Enter kDFU (32-bit) | `device_enter_mode` :2051 | — | Button in Recovery/DFU guides tab; timed button-press sequence per model |
-| Enter pwnDFU (32-bit, A6+) | same + `device_send_unpacked_ibss` :2395 | `gaster_pwn()` exists but is only called from `op_boot`/`op_reset` | Expose as its own op; needs an unpacked+pwned iBSS artifact |
-| Send Pwned iBSS (A5/A6) | `device_enter_mode` pwnDFU | — | New op; reuse `op_create`'s iBSS output |
-| kDFU send (`iBSS`/`iBEC` to DFU) | `device_send_unpacked_ibss` :2395 | `op_boot` does this for 64-bit | Generalize |
-| Exit Recovery (`irecovery -n`) | `main` case `exitrecovery` | — | Trivial op + warning that tethered devices need Just Boot instead |
-| Just Boot + history | `menu_justboot` :11554, `..._history` :11674, `device_justboot` :11797 | — | Menu of `all_flash`/restore-mode images with a persisted "last used" list |
-| DFU Mode Helper (animated, per-device) | `device_dfuhelper` :1887 | Static text guide in `restore_view` | Replace/augment with a real per-device timer; this is a UX win, not just parity |
-| Pwnage 2.0 / WTF mode (S5L8900) | `device_s5l8900xall` :1192, `device_entry_s5l8900` :929 | — | Only meaningful for iPhone1,1/iPod1,1 — low priority |
+| # | Feature | LIK | What we have | Needed |
+|---|---|---|---|---|
+| B14 | Exit Recovery (`irecovery -n`) + Just Boot + history | `main` case `exitrecovery`; `menu_justboot` :11554, `..._history` :11674, `device_justboot` :11797 | — | Exit op + warning that tethered devices need Just Boot; a persisted "last used" list of `all_flash`/restore-mode images |
+| B15 | Enter kDFU (32-bit) / pwnDFU (A6+) / send pwned iBSS (A5/A6) | `device_enter_mode` :2051, `device_send_unpacked_ibss` :2395 | `gaster_pwn()` exists but is only called from `op_boot`/`op_reset` | Expose as ops; needs an unpacked+pwned iBSS artifact (reuse `op_create` output) |
+| B16 | DFU Mode Helper (animated, per-device) | `device_dfuhelper` :1887 | Static text guide in `restore_view` | Replace/augment with a real per-device timer; a UX win, not just parity |
+| — | Pwnage 2.0 / WTF mode (S5L8900) | `device_s5l8900xall` :1192, `device_entry_s5l8900` :929 | — | Only meaningful for iPhone1,1/iPod1,1 — low priority, fold into B14 if cheap |
 
-### 6.3 Phase 2 — SSH ramdisk gaps
+### 6.3 SSH ramdisk gaps (`B17–B24`)
 
 The existing SSH Ramdisk tab covers `op_create`/`op_boot`/`op_reset`/
 `op_reboot`/`op_dump_blobs`/`op_clean`/`open_ssh_console` for A7–A11 + T2.
-`restore.sh` has substantially more, and `device_ramdisk` (:7159, 32-bit) vs
+`restore.sh` has substantially more; `device_ramdisk` (:7159, 32-bit) vs
 `device_ramdisk64` (:6949) is a whole second implementation we do not have.
 
-| Feature | LIK | Gap |
-|---|---|---|
-| **32-bit ramdisk** (A4–A6, incl. A5-only `kdfu` path) | `device_ramdisk` :7159, `device_ramdisk_ios3exploit` :7715 | Nothing. Needs 32-bit iBSS/iBEC (no KBAG on 32-bit → different decrypt path than `firmware_keys.py`), exploit ramdisks per device/build, and `nand-enable-reformat` bootargs for A4/A5/A6 |
-| **iOS 8 ramdisks** (64-bit) | `resources/sshrd/ios8/*.patch`, `device_ramdisk_ios8` | Our port has no iOS 8 support; `linux_build_blocked()` refuses 16.1+ but nothing covers 8.x |
-| Dump baseband + activation records | `device_dump` :11021, `device_dumprd` :11197, `device_dumpbb` :11150, `device_dumpactivation` :11115 | Nothing. Note the per-iOS-version path divergence: `/usr/local/standalone` → `Baseband/<Mav5\|Mav7Mav8\|Trek>/…`; activation records move from `root/Library/Lockdown` → `mobile/Library/mad` (iOS 8/9.0–9.2) → `containers/…/activation_records` + `data_ark.plist` (iOS 9.3+) |
-| Erase (iOS 7/8) `nvram obliterate=1`, erase (iOS 9+) `oblit-inprogress=5` | `menu_ramdisk` :7803–7807 | `op_reset` does data erase; the two distinct nvram recipes per version are not modelled |
-| Clear NVRAM `nvram -c` | `device_ramdisk_setnvram` :7680 | — |
-| Enable/disable exploit (`nvram remove4` toggle) | `menu_remove4` :6915, `device_send_rdtar` :6938 | — |
-| Get iOS version over SSH | `device_ramdisk_iosvers` :7757 | `op_dump_blobs` already does this as step 2 — extract it |
-| Update DateTime (`device_datetime_cmd`) | `device_datetime_cmd` :7748, `device_update_datetime` :10795 | `LockdownOps.sync_time()` exists for Normal mode; the SSH-ramdisk variant does not |
-| Install Bootstrap (iOS 7/8/9) | `menu_ramdisk` :7812 | — |
-| Install Untether (iOS 7) | :7815 | — |
-| Install OpenSSH (iOS 10 and lower) | :7817 | — |
-| Install TrollStore | `device_trollrestore` :12377, `resources/sshrd/trollstore.sh` | `restore_view` already has the boot-arg injection UI; the **install** step (trollstore.py + venv + `pymobiledevice3<=6.2.0`) is missing |
-| **Mount `/var/mobile`** (iOS 17+) | — | Not in LIK. Our payload only has `mount_filesystems`; `usr/bin/mount_ich` from `A12-A13-Ramdisk`'s `resources/ssh.tar.gz` mounts System/Preboot/xART/Data on iOS 17→27+ and is the candidate fix. Next: drop it into `assets/sshrd/sshtars/`, add its CDHash to the trustcache, test on hardware. `ich_ramdisk.op_mount` already calls whichever helper exists |
+| # | Feature | LIK | Gap |
+|---|---|---|---|
+| B17 | **32-bit ramdisk** (A4–A6, incl. A5-only `kdfu` path) | `device_ramdisk` :7159, `device_ramdisk_ios3exploit` :7715 | Nothing. Needs 32-bit iBSS/iBEC (no KBAG on 32-bit → different decrypt path than `firmware_keys.py`), exploit ramdisks per device/build, `nand-enable-reformat` bootargs for A4/A5/A6 |
+| B18 | **iOS 8 ramdisks** (64-bit) | `resources/sshrd/ios8/*.patch`, `device_ramdisk_ios8` | Our port has no iOS 8 support; `linux_build_blocked()` refuses 16.1+ but nothing covers 8.x |
+| B19 | Dump baseband + activation records | `device_dump` :11021, `device_dumprd` :11197, `device_dumpbb` :11150, `device_dumpactivation` :11115 | Per-iOS-version path divergence: `/usr/local/standalone` → `Baseband/<Mav5\|Mav7Mav8\|Trek>/…`; activation records move `root/Library/Lockdown` → `mobile/Library/mad` (iOS 8/9.0–9.2) → `containers/…/activation_records` + `data_ark.plist` (9.3+) |
+| B20 | Per-version erase recipes (iOS 7/8 `nvram obliterate=1`, iOS 9+ `oblit-inprogress=5`) | `menu_ramdisk` :7803–7807 | `op_reset` does data erase; the two distinct nvram recipes per version are not modelled |
+| B21 | Clear NVRAM / exploit enable-disable / DateTime | `device_ramdisk_setnvram` :7680, `menu_remove4` :6915, `device_send_rdtar` :6938, `device_datetime_cmd` :7748 | `LockdownOps.sync_time()` exists for Normal mode; the SSH-ramdisk variants do not |
+| B22 | Install Bootstrap (iOS 7/8/9) / Untether (iOS 7) / OpenSSH (≤iOS 10) | `menu_ramdisk` :7812–7817 | — |
+| B23 | Install TrollStore | `device_trollrestore` :12377, `resources/sshrd/trollstore.sh` | `restore_view` has the boot-arg injection UI; the **install** step (trollstore.py + venv + `pymobiledevice3<=6.2.0`) is missing |
+| B24 | **Mount `/var/mobile`** (iOS 17+) | — | Not in LIK. `usr/bin/mount_ich` from `A12-A13-Ramdisk`'s `resources/ssh.tar.gz` mounts System/Preboot/xART/Data on iOS 17→27+ and is the candidate fix. Drop it into `assets/sshrd/sshtars/`, add its CDHash to the trustcache, test on hardware. `ich_ramdisk.op_mount` already calls whichever helper exists |
 
-### 6.4 Phase 3 — SHSH blobs
+### 6.4 SHSH blobs (`B11–B13`)
 
-| Feature | LIK | Gap |
-|---|---|---|
-| Save OTA blobs for a chosen version | `shsh_save` :3093, `menu_shsh` :8910 | We only dump *on-board* blobs (`op_dump_blobs`). This is the ipsw.me/Apple API path, a completely different mechanism |
-| Latest-version baseband compatibility check | `shsh_save bbcheck` :8974 | — |
-| Cydia server blobs (32-bit) | `shsh_save_cydia` :8260 | — |
-| Onboard raw dump + convert to usable | `shsh_save_onboard dump` :8170, `shsh_convert_onboard` :8215, `menu_shsh_convert` :9042 | `op_dump_blobs` converts in-memory via `img4tool`; no raw-dump artifact, no 32-bit path (which needs the IPSW selected first, `menu_shsh_onboard` :9004) |
-| Onboard blobs for jailbroken 64-bit (deverser) | `shsh_save_onboard64` :8094 | — |
-| Cryptex seed + APTicket (x8A4, iOS 16+) | `shsh_save_onboard64` :8094 | — |
-| ECID → device name mapping for blob filenames | `device_get_name` :948 | — |
+| # | Feature | LIK | Gap |
+|---|---|---|---|
+| B11 | Save OTA blobs for a chosen version | `shsh_save` :3093, `menu_shsh` :8910 | We only dump *on-board* blobs (`op_dump_blobs`). This is the ipsw.me/Apple API path — a different mechanism. Also latest-version baseband compatibility check (`shsh_save bbcheck` :8974) |
+| B12 | Onboard raw dump + convert to usable | `shsh_save_onboard dump` :8170, `shsh_convert_onboard` :8215, `menu_shsh_convert` :9042 | `op_dump_blobs` converts in-memory via `img4tool`; no raw-dump artifact, no 32-bit path (needs the IPSW selected first, `menu_shsh_onboard` :9004) |
+| B13 | Cydia server blobs (32-bit) + 64-bit deverser + Cryptex/APTicket (x8A4, iOS 16+) | `shsh_save_cydia` :8260, `shsh_save_onboard64` :8094 | Also ECID → device-name mapping for blob filenames (`device_get_name` :948) |
 
-### 6.5 Phase 4 — Restore / downgrade
+### 6.5 Restore / downgrade (`B25+`)
 
 The heaviest phase, and the one with the most upstream dependencies. Split it;
 do not attempt it as one piece.
 
-| Feature | LIK | Gap |
-|---|---|---|
-| Signed-OTA downgrade (6.1.3 / 8.4.1 / 10.3.3) | `restore_futurerestore` :6155, `ipsw_prepare_1033` :3278 | `restore_view`'s IPSW Restore is a plain `idevicerestore` flash. No SHSH/BB handling, no version matrix |
-| Restore with SHSH blobs | `ipsw_get_url` :2692 + `restore_futurerestore` | Needs blob selection + futurerestore (`futurerestore_new`/`futurerestore_old`, both LIK-built) |
-| Latest iOS restore (64-bit, `--use-dev`, `--use-pwndfu`) | `restore_latest` :6286, `restore_pwned64` :6697, `restore_notpwned64` :6713, `restore_prepare_pwnrec64` :6350 | — |
-| powdersn0w restore | `ipsw_prepare_powder` :5652, `ipsw_prepare_powder_exploit` :5100 | Needs `powdersn0w_pub`, 32-bit bundles, `baseband`/`partitions` assets |
-| DRA v6 restore | `ipsw_prepare_patchcomp` :5775 | — |
-| Tethered restore | `ipsw_prepare_tethered` :5479 | — |
-| Set Nonce Only (A7–A10) | `menu_restore` :9157 | — |
-| DFU IPSW | `device_dfuipsw` :11442 | — |
-| **Custom IPSW creation** (30+ steps) | `ipsw_prepare*` :2878–6011, `ipsw_prepare_bundle` :3870, `ipsw_prepare_config` :3811, `ipsw_prepare_keys` :3631, `ipsw_bbdigest` :4304, `patch_iboot` :4436 | The single biggest item in LIK. `DeviceTree`/`RestoreDeviceTree`, `asr`, `iBoot`, `kernelcache`, `LLB`, `WTF` patch selection; `scab_template.img3`; logo conversion; `bspatch` diffs |
-| Multipatch / gas-gauge (error 29) | `ipsw_prepare_multipatch` :5159 | Flag-driven; bundles 4.3–6.1.3 components |
-| disable-bbupdate + stitch dumped baseband | `ipsw_bbreplace` :4338, `restore_download_bbsep` :6024 | Pairs with §6.3's baseband dump |
-| Stitch dumped activation records | `ipsw_prepare_config` :3811, `device_actrec` | iOS ≤ 9.2.1 only |
-| Jailbreak-in-IPSW option | `ipsw_prepare_jailbreak` :3415 | — |
-| IPSW Downloader (standalone, no device) | `menu_ipsw_downloader` :9211 | Genuinely useful forensically — partial-ZIP the members you need |
-| Device-supported-version gating and warnings | `menu_restore` :9097, `ipsw_print_warnings` :9925 | iPad2,4 / iPhone5,[34] exceptions, "no blobs" warnings |
+| # | Feature | LIK | Gap |
+|---|---|---|---|
+| B25 | Signed-OTA downgrade (6.1.3 / 8.4.1 / 10.3.3) | `restore_futurerestore` :6155, `ipsw_prepare_1033` :3278 | `restore_view`'s IPSW Restore is a plain `idevicerestore` flash. No SHSH/BB handling, no version matrix |
+| B26 | Restore with SHSH blobs | `ipsw_get_url` :2692 + `restore_futurerestore` | Needs blob selection + futurerestore (`futurerestore_new`/`futurerestore_old`, both LIK-built) |
+| B27 | Latest iOS restore (64-bit, `--use-dev`, `--use-pwndfu`) | `restore_latest` :6286, `restore_pwned64` :6697, `restore_notpwned64` :6713, `restore_prepare_pwnrec64` :6350 | — |
+| B28 | powdersn0w restore | `ipsw_prepare_powder` :5652, `ipsw_prepare_powder_exploit` :5100 | Needs `powdersn0w_pub`, 32-bit bundles, `baseband`/`partitions` assets |
+| B29 | DRA v6 restore | `ipsw_prepare_patchcomp` :5775 | — |
+| B30 | Tethered restore | `ipsw_prepare_tethered` :5479 | — |
+| B31 | Set Nonce Only (A7–A10) | `menu_restore` :9157 | — |
+| B32 | DFU IPSW | `device_dfuipsw` :11442 | — |
+| B33+ | **Custom IPSW creation** (30+ steps) | `ipsw_prepare*` :2878–6011, `ipsw_prepare_bundle` :3870, `ipsw_prepare_config` :3811, `ipsw_prepare_keys` :3631, `ipsw_bbdigest` :4304, `patch_iboot` :4436 | The single biggest item in LIK — its own multi-block project. `DeviceTree`/`RestoreDeviceTree`, `asr`, `iBoot`, `kernelcache`, `LLB`, `WTF` patch selection; `scab_template.img3`; logo conversion; `bspatch` diffs |
+| B- | Multipatch / gas-gauge (error 29) | `ipsw_prepare_multipatch` :5159 | Flag-driven; bundles 4.3–6.1.3 components |
+| B- | disable-bbupdate + stitch dumped baseband | `ipsw_bbreplace` :4338, `restore_download_bbsep` :6024 | Pairs with B19 |
+| B- | Stitch dumped activation records | `ipsw_prepare_config` :3811, `device_actrec` | iOS ≤ 9.2.1 only |
+| B- | Jailbreak-in-IPSW option | `ipsw_prepare_jailbreak` :3415 | — |
+| B- | IPSW Downloader (standalone, no device) | `menu_ipsw_downloader` :9211 | Genuinely useful forensically — partial-ZIP the members you need |
+| B- | Device-supported-version gating and warnings | `menu_restore` :9097, `ipsw_print_warnings` :9925 | iPad2,4 / iPhone5,[34] exceptions, "no blobs" warnings |
 
-### 6.6 Phase 5 — App & data management
+### 6.6 App & data management (`B2–B10`)
 
-Cheap relative to phase 4, and much of it maps onto existing pymobiledevice3
-services rather than new binaries.
+Cheap relative to §6.5, and much of it maps onto existing pymobiledevice3
+services rather than new binaries. Each row is one block (B2–B10 in the index).
 
-| Feature | LIK | Gap |
-|---|---|---|
-| Install IPA | `device_appinst` :11902, `menu_ipa` :8705 | — |
-| List user / system / all apps | `menu_appmanage` :8525–8527 | `files_apps_view` has an installed-apps inspector; needs the user/system/all split |
-| Dump app / all apps as IPA | `device_dumpapp` :12018 | Needs `resources/appdump/{clutch,clutch13,clutch204,ipainstaller,ipainstaller_legacy}` + rcky844 forks. Upstream marks it unmaintained — port last, or skip |
-| Sideload IPA | `device_altserver` :11925 (AltServer-Linux + anisette-server), `device_plumesign` :11992, `menu_plumesign_accounts` :8820 | AltServer-Linux and PlumeSign are **Linux/macOS** → WSL. anisette on Windows needs extra work; check before promising |
-| Mount device over SSH (sshfs) / raw FS / Cydia AutoInstall drop | `menu_datamanage` :8573–8599 | Needs sshfs on the Windows side, or SFTP-backed file browser instead. The Cydia variant is iOS-only (pre-9) |
-| Backup / Restore | `device_backup_create` :12343, `device_backup_restore` :12354 | Done (`restore_view` "Backup Restore") |
-| Backup encryption on/off/change password | `menu_backup_encryption` :8649 | Not present — `idevicebackup2 -i encryption …` equivalent |
-| Erase all content and settings | `device_erase` :12364 | — |
-| Pair device | `device_pair` :10809 | — |
-| Attempt activation (`ideviceactivation`) | `device_activate` :11263 | `get_activation_state()` exists; the *activate* call does not. Very useful for iOS ≤ 4 |
-| Hacktivate / revert hacktivation | `device_hacktivate` :11280, `device_reverthacktivation` :11337 | Patches lockdownd. iOS 3.0–7.1.2 |
-| Export device info / battery info | `menu_miscutilities` :10634, :10645 | `get_battery_info()` exists; the *export to file* action does not |
-| Run uicache over SSH | `device_uicache` :12333 | — |
-| Live console (`idevicesyslog`) | :10788 | Done (`syslog_view`) |
-| (Re-)install dependencies | `install_depends` :668 | N/A — our deps are `requirements.txt` / `pyproject.toml`. The *version-update check* (`version_get` :807, `version_update` :764) is worth porting |
+| # | Feature | LIK | Gap |
+|---|---|---|---|
+| B2 | (Re-)install dependency / version-update check | `version_get` :807, `version_update` :764 | Our deps are `requirements.txt`/`pyproject.toml`; port the *version-update check* only |
+| B3 | List user / system / all apps | `menu_appmanage` :8525–8527 | `files_apps_view` has an installed-apps inspector; needs the user/system/all split |
+| B4 | Install IPA | `device_appinst` :11902, `menu_ipa` :8705 | — |
+| B5 | Backup encryption on/off/change password | `menu_backup_encryption` :8649 | Not present — `idevicebackup2 -i encryption …` equivalent |
+| B6 | Erase all content and settings | `device_erase` :12364 | — |
+| B7 | Pair device | `device_pair` :10809 | — |
+| B8 | Attempt activation (`ideviceactivation`) | `device_activate` :11263 | `get_activation_state()` exists; the *activate* call does not. Very useful for iOS ≤ 4 |
+| B9 | Export device info / battery info | `menu_miscutilities` :10634, :10645 | `get_battery_info()` exists; the *export to file* action does not |
+| B10 | Data management: uicache / mount over SSH / raw FS / Cydia AutoInstall | `device_uicache` :12333, `menu_datamanage` :8573–8599 | `device_uicache` is straightforward (needs ramdisk). The mount rows need a decision: sshfs on Windows vs. an SFTP-backed browser. **Decision-gated.** |
+| — | Dump app / all apps as IPA | `device_dumpapp` :12018 | Needs `resources/appdump/{clutch,clutch13,clutch204,ipainstaller,ipainstaller_legacy}` + rcky844 forks. Upstream marks it unmaintained — port last, or skip |
+| — | Sideload IPA | `device_altserver` :11925 (AltServer-Linux + anisette-server), `device_plumesign` :11992 | AltServer-Linux and PlumeSign are Linux/macOS → WSL. anisette on Windows needs extra work; check before promising |
+| — | Backup / Restore | `device_backup_create` :12343, `device_backup_restore` :12354 | **Done** (`restore_view` "Backup Restore") |
+| — | Hacktivate / revert hacktivation | `device_hacktivate` :11280, `device_reverthacktivation` :11337 | Patches lockdownd. iOS 3.0–7.1.2 |
+| — | Live console (`idevicesyslog`) | :10788 | **Done** (`syslog_view`) |
 
-### 6.7 Phase 6 — 32-bit jailbreak payloads
+### 6.7 Phase 6 — 32-bit jailbreak payloads (`B-last`)
 
 Only reachable once §6.1 and §6.2 exist. Assets live in `resources/jailbreak/`:
 `g1lbertJB` (payload + per-device tars + `debs/`), `greenpois0n` per-device
@@ -421,15 +460,30 @@ everything else 3.1.3–9.3.4 with exceptions.
 
 ### 6.9 Sequencing summary
 
-1. **§6.1** capability database (`device_db.py` + tests) — unblocks all of it.
-2. **§6.6** app/data management — cheapest wins, mostly existing pymobiledevice3
-   services, no new binaries.
-3. **§6.2** DFU/Recovery plumbing + **§6.3** 32-bit & iOS 8 ramdisk — the
-   highest-risk hardware work; needs real checkm8 hardware (still owed per §2).
-4. **§6.4** SHSH suite — self-contained once §6.1 exists.
-5. **§6.5** restore/downgrade, split per row; custom IPSW last.
-6. **§6.7** 32-bit jailbreak payloads, once the ramdisk work is proven.
+Execution follows the block index (§6.0.2): **B0 → B1a–B1f → B2–B10 → B11–B13
+→ B14–B16 → B17–B24 → B25+ → B-last**. Rationale:
+1. **B0/B1*** — the capability DB unblocks every later gate; pure data, no device.
+2. **B2–B10** — cheapest wins, mostly existing pymobiledevice3 services, no new
+   binaries; independent of the capability DB.
+3. **B11–B13** (SHSH) — self-contained once B1 exists.
+4. **B14–B16 / B17–B24** — highest-risk hardware work; needs real checkm8
+   hardware (still owed, see §6.10).
+5. **B25+** — restore/downgrade, split per row; custom IPSW last.
+6. **B-last** — 32-bit jailbreak once the ramdisk work is proven.
 
-Every phase adds offline tests to `tests/` asserting *constructed argv* with the
+Every block adds offline tests to `tests/` asserting *constructed argv* with the
 runner stubbed — the approach that caught the `wsl_arg` and `paths.app_dir()`
 bugs (AGENTS.md, "Asset paths and WSL argv").
+
+### 6.10 Standing hardware gates
+
+Slot these between blocks whenever a real device is available; each closes part
+of §2.
+
+- **G1 — SSH ramdisk on real checkm8.** `gaster pwn`, a full `Create` against an
+  actual IPSW, `Boot`, the erase path, `op_dump_blobs`/`op_reset`/`op_clean` on
+  A7–A11; confirm the DFU driver story (Zadig/WinUSB) on a clean Windows install.
+- **G2 — whole A12/A13 usbliter8 tab on hardware** (currently unverified).
+- **G3 — frozen PyInstaller build end-to-end.** Build, then confirm
+  `dist_pymobile3/Pymobile3-GUI/Pymobile3-GUI.exe --run-pymobiledevice3 usbmux list`
+  prints device JSON.
