@@ -24,6 +24,7 @@ from pymobile3_gui.core.backend.backup_engine import (
     resolve_backup_source, restore_backup
 )
 from pymobile3_gui.core.backend import ramdisk_manager as ram
+from pymobile3_gui.core.backend import ich_ramdisk as ich
 from pymobile3_gui.core.backend import device_ident as ident
 
 
@@ -427,6 +428,264 @@ class RestoreView(QWidget):
 
         self.tabs.insertTab(2, ram_tab, "🔐 SSH Ramdisk")
 
+        # ── Tab 4: A12/A13 Ramdisk (EXPERIMENTAL) ───────────────────────────
+        # Different silicon, different exploit and a different toolchain from
+        # the checkm8 tab: usbliter8 instead of gaster, and a patched
+        # iBoot/SPTM/TXM/kernel chain instead of SSHRD's. Two of its steps are
+        # macOS-only and are surfaced in the UI rather than faked.
+        self._ich_busy = False
+
+        ich_tab = QWidget()
+        self._ich_tab = ich_tab
+        ich_layout = QVBoxLayout(ich_tab)
+        ich_layout.setContentsMargins(8, 8, 8, 8)
+        ich_layout.setSpacing(12)
+
+        banner = QFrame(self)
+        banner.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Colors.DANGER_BG};
+                border: 1px solid {Colors.DANGER_BORDER};
+                border-radius: 10px;
+                padding: 12px;
+            }}
+        """)
+        ban_v = QVBoxLayout(banner)
+        ban_v.setSpacing(4)
+        lbl_ban_title = QLabel(
+            "⚠  HIGHLY EXPERIMENTAL — not responsible for any result of "
+            "utilizing this tab.", self)
+        lbl_ban_title.setStyleSheet(
+            "font-size: 13px; font-weight: 750; color: #ffd7d5;")
+        lbl_ban_title.setWordWrap(True)
+        ban_v.addWidget(lbl_ban_title)
+        lbl_ban_body = QLabel(
+            "Unverified from this app. It patches iBoot, SPTM/TXM and the "
+            "kernel and loads them over USB; a wrong patch set or a stale "
+            "build can leave the device unable to boot. Two upstream steps "
+            "need macOS and are not implemented here: the APFS ramdisk "
+            "expand/inject (supply a prepared ramdisk below) and the "
+            "usbliter8 handoff into Recovery (do that first, with the "
+            "upstream toolkit on an RP2350).", self)
+        lbl_ban_body.setStyleSheet(
+            f"font-size: 11px; color: {Colors.TEXT_SECONDARY};")
+        lbl_ban_body.setWordWrap(True)
+        ban_v.addWidget(lbl_ban_body)
+        ich_layout.addWidget(banner)
+
+        lbl_ich_desc = QLabel(
+            "SSH ramdisk for A12 (iPhone XR/XS) and A13 (iPhone 11) after a "
+            "usbliter8 pwn. Fetch and patch the bootchain here; hand the "
+            "device off with usbliter8, then load it from Recovery.", self)
+        lbl_ich_desc.setStyleSheet(
+            f"font-size: 12px; color: {Colors.TEXT_SECONDARY};")
+        lbl_ich_desc.setWordWrap(True)
+        ich_layout.addWidget(lbl_ich_desc)
+
+        self.lbl_ich_dev = QLabel("A12/A13 device: not detected", self)
+        self.lbl_ich_dev.setStyleSheet(
+            f"font-size: 12px; font-weight: 600; color: {Colors.TEXT_SECONDARY};")
+        ich_layout.addWidget(self.lbl_ich_dev)
+
+        self.lbl_ich_chain = QLabel("Bootchain: not built", self)
+        self.lbl_ich_chain.setStyleSheet(
+            f"font-size: 11px; color: {Colors.TEXT_MUTED};")
+        self.lbl_ich_chain.setWordWrap(True)
+        ich_layout.addWidget(self.lbl_ich_chain)
+
+        src_card = QFrame(self)
+        src_card.setStyleSheet(ram_card_qss)
+        src_v = QVBoxLayout(src_card)
+        src_v.setSpacing(8)
+
+        lbl_src_title = QLabel("Toolkit & prepared files", self)
+        lbl_src_title.setStyleSheet("font-weight: 600; font-size: 12px;")
+        src_v.addWidget(lbl_src_title)
+
+        tk_row = QHBoxLayout()
+        lbl_tk = QLabel("Toolkit folder:")
+        lbl_tk.setStyleSheet("font-size: 12px;")
+        tk_row.addWidget(lbl_tk)
+        self.txt_ich_toolkit = QLineEdit(ich.default_toolkit_dir(), self)
+        self.txt_ich_toolkit.setPlaceholderText(
+            "Folder with patch/ and resources/ from A12-A13-Ramdisk")
+        tk_row.addWidget(self.txt_ich_toolkit, stretch=1)
+        btn_tk = QPushButton("Browse...", self)
+        btn_tk.setCursor(QCursor(Qt.PointingHandCursor))
+        btn_tk.setStyleSheet(secondary_btn_qss)
+        btn_tk.clicked.connect(self._ich_browse_toolkit)
+        tk_row.addWidget(btn_tk)
+        src_v.addLayout(tk_row)
+
+        self.lbl_ich_ticket = QLabel("", self)
+        self.lbl_ich_ticket.setWordWrap(True)
+        self.lbl_ich_ticket.setStyleSheet(
+            f"font-size: 11px; color: {Colors.TEXT_MUTED};")
+        src_v.addWidget(self.lbl_ich_ticket)
+        self.txt_ich_toolkit.textChanged.connect(self._update_ich_ticket)
+
+        rd_row = QHBoxLayout()
+        lbl_rd = QLabel("Prepared ramdisk:")
+        lbl_rd.setStyleSheet("font-size: 12px;")
+        rd_row.addWidget(lbl_rd)
+        self.txt_ich_ramdisk = QLineEdit(self)
+        self.txt_ich_ramdisk.setPlaceholderText(
+            "Expanded, SSH-injected ramdisk.dmg from the upstream toolkit")
+        rd_row.addWidget(self.txt_ich_ramdisk, stretch=1)
+        btn_rd = QPushButton("Browse...", self)
+        btn_rd.setCursor(QCursor(Qt.PointingHandCursor))
+        btn_rd.setStyleSheet(secondary_btn_qss)
+        btn_rd.clicked.connect(self._ich_browse_ramdisk)
+        rd_row.addWidget(btn_rd)
+        src_v.addLayout(rd_row)
+
+        tc_row = QHBoxLayout()
+        lbl_tc = QLabel("Trustcache:")
+        lbl_tc.setStyleSheet("font-size: 12px;")
+        tc_row.addWidget(lbl_tc)
+        self.cmb_ich_tc = QComboBox(self)
+        self.cmb_ich_tc.addItem("Prepared trustcache.bin (recommended)", "prepared")
+        self.cmb_ich_tc.addItem("Stock trustcache from the IPSW", "stock")
+        self.cmb_ich_tc.setMinimumWidth(220)
+        tc_row.addWidget(self.cmb_ich_tc)
+        self.txt_ich_trustcache = QLineEdit(self)
+        self.txt_ich_trustcache.setPlaceholderText("trustcache.bin")
+        self.txt_ich_trustcache.setEnabled(False)
+        self.cmb_ich_tc.currentIndexChanged.connect(
+            self._update_ich_trustcache_field)
+        # currentIndexChanged never fires for the item added before the
+        # connection, so the default mode's state has to be applied once here.
+        self._update_ich_trustcache_field(0)
+        tc_row.addWidget(self.txt_ich_trustcache, stretch=1)
+        btn_tc = QPushButton("Browse...", self)
+        btn_tc.setCursor(QCursor(Qt.PointingHandCursor))
+        btn_tc.setStyleSheet(secondary_btn_qss)
+        btn_tc.clicked.connect(self._ich_browse_trustcache)
+        tc_row.addWidget(btn_tc)
+        src_v.addLayout(tc_row)
+        ich_layout.addWidget(src_card)
+
+        fw2_card = QFrame(self)
+        fw2_card.setStyleSheet(ram_card_qss)
+        fw2_v = QVBoxLayout(fw2_card)
+        fw2_v.setSpacing(8)
+        lbl_fw2 = QLabel("Firmware", self)
+        lbl_fw2.setStyleSheet("font-weight: 600; font-size: 12px;")
+        fw2_v.addWidget(lbl_fw2)
+
+        fw2_row = QHBoxLayout()
+        lbl_fw2b = QLabel("Ramdisk iOS version:")
+        lbl_fw2b.setStyleSheet("font-size: 12px;")
+        fw2_row.addWidget(lbl_fw2b)
+        self.cmb_ich_version = QComboBox(self)
+        self.cmb_ich_version.setMinimumWidth(200)
+        self.cmb_ich_version.addItem(
+            "Connect an A12/A13 device to list versions", "")
+        fw2_row.addWidget(self.cmb_ich_version, stretch=1)
+        btn_fw2_refresh = QPushButton("Refresh", self)
+        btn_fw2_refresh.setCursor(QCursor(Qt.PointingHandCursor))
+        btn_fw2_refresh.setStyleSheet(secondary_btn_qss)
+        btn_fw2_refresh.clicked.connect(self._ram_refresh_versions)
+        fw2_row.addWidget(btn_fw2_refresh)
+        fw2_v.addLayout(fw2_row)
+        ich_layout.addWidget(fw2_card)
+
+        opt2_card = QFrame(self)
+        opt2_card.setStyleSheet(ram_card_qss)
+        opt2_v = QVBoxLayout(opt2_card)
+        opt2_v.setSpacing(8)
+        lbl_opt2 = QLabel("Patching options", self)
+        lbl_opt2.setStyleSheet("font-weight: 600; font-size: 12px;")
+        opt2_v.addWidget(lbl_opt2)
+
+        k_row = QHBoxLayout()
+        lbl_k = QLabel("Kernel:")
+        lbl_k.setStyleSheet("font-size: 12px;")
+        k_row.addWidget(lbl_k)
+        self.cmb_ich_kernel = QComboBox(self)
+        self.cmb_ich_kernel.addItem("patched (AMFI bypass)", "patched")
+        self.cmb_ich_kernel.addItem("stock", "stock")
+        k_row.addWidget(self.cmb_ich_kernel)
+        lbl_kpf = QLabel("Patch set:")
+        lbl_kpf.setStyleSheet("font-size: 12px;")
+        k_row.addWidget(lbl_kpf)
+        self.cmb_ich_kpf = QComboBox(self)
+        for label, value in (
+            ("auto (recommended)", "auto"),
+            ("iOS 17/18 finder", "ios18"),
+            ("iOS 26 byte table", "ios26-bytes"),
+            ("iOS 27 / TXM", "ios27"),
+            ("all", "all"),
+        ):
+            self.cmb_ich_kpf.addItem(label, value)
+        k_row.addWidget(self.cmb_ich_kpf, stretch=1)
+        opt2_v.addLayout(k_row)
+
+        self.chk_ich_fw = QCheckBox(
+            "Stage USB coprocessor firmwares (AOP/ANE/AVE/ISP/GFX/SIO) — "
+            "without them XNU can hang after iBoot", self)
+        self.chk_ich_fw.setChecked(True)
+        self.chk_ich_fw.setStyleSheet("font-size: 12px;")
+        opt2_v.addWidget(self.chk_ich_fw)
+        self.chk_ich_ibss = QCheckBox(
+            "Boot patched iBSS first (slower; direct iBEC is the proven path)",
+            self)
+        self.chk_ich_ibss.setStyleSheet("font-size: 12px;")
+        opt2_v.addWidget(self.chk_ich_ibss)
+        self.chk_ich_logo = QCheckBox("Show the bundled boot logo", self)
+        self.chk_ich_logo.setChecked(True)
+        self.chk_ich_logo.setStyleSheet("font-size: 12px;")
+        opt2_v.addWidget(self.chk_ich_logo)
+        self.chk_ich_sep = QCheckBox(
+            "Load RestoreSEP before the ramdisk (rsepfirmware)", self)
+        self.chk_ich_sep.setChecked(True)
+        self.chk_ich_sep.setStyleSheet("font-size: 12px;")
+        opt2_v.addWidget(self.chk_ich_sep)
+        ich_layout.addWidget(opt2_card)
+
+        self.btn_ich_create = QPushButton("🔐 Create Bootchain", self)
+        self.btn_ich_create.setCursor(QCursor(Qt.PointingHandCursor))
+        self.btn_ich_create.setStyleSheet(primary_btn_qss)
+        self.btn_ich_create.clicked.connect(self._start_ich_create)
+        ich_layout.addWidget(self.btn_ich_create)
+
+        ich_row1 = QHBoxLayout()
+        ich_row1.setSpacing(8)
+        self.btn_ich_boot = QPushButton("▶ Boot Bootchain", self)
+        self.btn_ich_mount = QPushButton("💾 Mount Filesystems", self)
+        self.btn_ich_console = QPushButton("Open SSH Console", self)
+        self.btn_ich_clean = QPushButton("Clean Workspace", self)
+        for btn in (self.btn_ich_boot, self.btn_ich_mount,
+                    self.btn_ich_console, self.btn_ich_clean):
+            btn.setCursor(QCursor(Qt.PointingHandCursor))
+            btn.setStyleSheet(secondary_btn_qss)
+            ich_row1.addWidget(btn, stretch=1)
+        self.btn_ich_boot.clicked.connect(self._start_ich_boot)
+        self.btn_ich_mount.clicked.connect(self._start_ich_mount)
+        self.btn_ich_console.clicked.connect(self._start_ich_console)
+        self.btn_ich_clean.clicked.connect(self._start_ich_clean)
+        ich_layout.addLayout(ich_row1)
+
+        lbl_ich_note = QLabel(
+            "Boot Bootchain needs the device already in Recovery — the usbliter8 "
+            "jump out of DFU has to happen first. Mount Filesystems runs "
+            "mount_ich (or mount_filesystems) over SSH once the ramdisk is up.",
+            self)
+        lbl_ich_note.setStyleSheet(
+            f"font-size: 11px; color: {Colors.TEXT_MUTED};")
+        lbl_ich_note.setWordWrap(True)
+        ich_layout.addWidget(lbl_ich_note)
+        ich_layout.addStretch()
+
+        self._ich_buttons = [
+            self.btn_ich_create, self.btn_ich_boot, self.btn_ich_mount,
+            self.btn_ich_console, self.btn_ich_clean,
+        ]
+
+        self.tabs.insertTab(3, ich_tab, "⚗️ A12/A13 Ramdisk")
+        self._update_ich_ticket()
+        self._update_ich_chain_label()
+
         self._dfu_timer = QTimer(self)
         self._dfu_timer.setInterval(1500)
         self._dfu_timer.timeout.connect(self._poll_dfu)
@@ -444,6 +703,8 @@ class RestoreView(QWidget):
         tm.task_started.connect(self._on_ram_task_started)
         tm.task_finished.connect(self._on_ram_task_finished)
         tm.task_finished.connect(self._on_restore_task_finished)
+        tm.task_started.connect(self._on_ich_task_started)
+        tm.task_finished.connect(self._on_ich_task_finished)
         self._ram_versions_ready.connect(self._on_ram_versions_ready)
         self._ram_wsl_ready.connect(self._on_ram_wsl_ready)
         threading.Thread(target=self._ram_probe_wsl, daemon=True).start()
@@ -726,13 +987,16 @@ class RestoreView(QWidget):
         timer = getattr(self, "_dfu_timer", None)
         if timer is None:
             return
-        if self.tabs.widget(index) is self._ram_tab and not self._ram_busy:
+        # One irecovery poll feeds both ramdisk tabs; only run it while one of
+        # them is actually on screen.
+        wanted = self.tabs.widget(index) in (self._ram_tab, self._ich_tab)
+        if wanted and not (self._ram_busy or self._ich_busy):
             timer.start()
         else:
             timer.stop()
 
     def _poll_dfu(self) -> None:
-        if self._ram_busy or self._ram_probe_running:
+        if self._ram_busy or self._ich_busy or self._ram_probe_running:
             return
         exe = ram.win_tool("irecovery")
         if not os.path.isfile(exe):
@@ -777,6 +1041,7 @@ class RestoreView(QWidget):
             dev = ram.parse_device_info(out)
         self._ram_dev = dev
         self._update_ram_dfu_label()
+        self._update_ich_dev_label()
         product = (dev or {}).get("product", "")
         if product and product != self._ram_versions_product:
             self._ram_versions_product = product
@@ -823,14 +1088,18 @@ class RestoreView(QWidget):
         if self._ram_versions_loading:
             return
         product = (self._ram_dev or {}).get("product") or self._ram_versions_product
+        combos = (self.cmb_ram_version, self.cmb_ich_version)
         if not product:
-            self.cmb_ram_version.clear()
-            self.cmb_ram_version.addItem(
-                "Connect a DFU device to list versions", "")
+            for combo, hint in zip(combos, (
+                    "Connect a DFU device to list versions",
+                    "Connect an A12/A13 device to list versions")):
+                combo.clear()
+                combo.addItem(hint, "")
             return
         self._ram_versions_loading = True
-        self.cmb_ram_version.clear()
-        self.cmb_ram_version.addItem(f"Looking up {product} on ipsw.me…", "")
+        for combo in combos:
+            combo.clear()
+            combo.addItem(f"Looking up {product} on ipsw.me…", "")
         threading.Thread(
             target=self._ram_fetch_versions, args=(product,),
             daemon=True).start()
@@ -847,29 +1116,37 @@ class RestoreView(QWidget):
         expected = (self._ram_dev or {}).get("product") or self._ram_versions_product
         if expected and product != expected:
             return
-        self.cmb_ram_version.clear()
         if firmwares and str(firmwares[0]["version"]).startswith("__error__"):
             msg = str(firmwares[0]["version"])[len("__error__"):]
-            self.cmb_ram_version.addItem("Lookup failed", "")
+            self._populate_versions([{"version": "Lookup failed", "signed": False}])
             self.lbl_ram_version_warn.setText(f"ipsw.me lookup failed: {msg}")
             self.lbl_ram_version_warn.show()
             return
+        self._populate_versions(firmwares)
+        self._update_ram_version_warn()
+
+    def _populate_versions(self, firmwares: list) -> None:
+        """Fill both ramdisk version combos from one ipsw.me response."""
         first_signed = None
+        entries = []
         for fw in firmwares:
             ver = str(fw.get("version", ""))
             if not ver:
                 continue
             label = ver if fw.get("signed") else f"{ver} (unsigned)"
-            self.cmb_ram_version.addItem(label, ver)
+            entries.append((label, ver))
             if fw.get("signed") and first_signed is None:
                 first_signed = ver
-        if self.cmb_ram_version.count() == 0:
-            self.cmb_ram_version.addItem("No firmware versions returned", "")
-        elif first_signed:
-            idx = self.cmb_ram_version.findData(first_signed)
-            if idx >= 0:
-                self.cmb_ram_version.setCurrentIndex(idx)
-        self._update_ram_version_warn()
+        for combo in (self.cmb_ram_version, self.cmb_ich_version):
+            combo.clear()
+            for label, ver in entries:
+                combo.addItem(label, ver)
+            if not entries:
+                combo.addItem("No firmware versions returned", "")
+            elif first_signed:
+                idx = combo.findData(first_signed)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
 
     def _update_ram_version_warn(self, *_args) -> None:
         ver = self.cmb_ram_version.currentData() or ""
@@ -1133,5 +1410,266 @@ class RestoreView(QWidget):
             title="SSH Console",
             subtitle="root@localhost:2222",
             steps=["Open Console"],
+            worker_fn=run_job,
+        )
+
+    # ── A12/A13 Ramdisk tab (EXPERIMENTAL) ──────────────────────────
+
+    def _ich_browse_toolkit(self) -> None:
+        d = QFileDialog.getExistingDirectory(
+            self, "Select the A12-A13-Ramdisk toolkit folder",
+            self.txt_ich_toolkit.text().strip())
+        if d:
+            self.txt_ich_toolkit.setText(d)
+
+    def _ich_browse_ramdisk(self) -> None:
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Select the prepared ramdisk image", "",
+            "Disk images (*.dmg *.img *.raw);;All files (*)")
+        if f:
+            self.txt_ich_ramdisk.setText(f)
+
+    def _ich_browse_trustcache(self) -> None:
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Select trustcache.bin", "", "All files (*)")
+        if f:
+            self.txt_ich_trustcache.setText(f)
+
+    def _update_ich_trustcache_field(self, *_args) -> None:
+        self.txt_ich_trustcache.setEnabled(
+            self.cmb_ich_tc.currentData() == "prepared")
+
+    def _update_ich_ticket(self, *_args) -> None:
+        """Say up front whether the chain can be signed for the plugged device."""
+        dev = self._ram_dev
+        toolkit = self.txt_ich_toolkit.text().strip()
+        if not ich.is_ich_device(dev):
+            self.lbl_ich_ticket.setText("")
+            return
+        ticket = ich.im4m_path(toolkit, dev["cpid"])
+        if os.path.isfile(ticket) and os.path.getsize(ticket) > 0:
+            text = f"APTicket: {os.path.basename(ticket)}"
+            color = Colors.SUCCESS
+        else:
+            text = (f"No APTicket: expected {os.path.basename(ticket)} in the "
+                    "toolkit's resources/ folder.")
+            color = Colors.DANGER
+        self.lbl_ich_ticket.setText(text)
+        self.lbl_ich_ticket.setStyleSheet(
+            f"font-size: 11px; font-weight: 600; color: {color};")
+
+    def _update_ich_dev_label(self) -> None:
+        dev = self._ram_dev
+        if not dev:
+            self.lbl_ich_dev.setText(
+                "A12/A13 device: not detected — needs CPID 0x8020 / 0x8030")
+            color = Colors.TEXT_SECONDARY
+        elif not ich.is_ich_device(dev):
+            # ident.describe() already carries the product name, so don't also
+            # print the (usually identical) irecovery fields.
+            known = ident.describe(dev["cpid"]) or self._dfu_device_name(dev)
+            self.lbl_ich_dev.setText(
+                f"A12/A13 device: {known} — CPID {dev['cpid']} is not an "
+                "A12/A13 chip, use the SSH Ramdisk tab")
+            color = Colors.DANGER
+        elif ich.is_ich_pwned(dev):
+            self.lbl_ich_dev.setText(
+                f"A12/A13 device: {self._dfu_device_name(dev)} — CPID "
+                f"{dev['cpid']}, pwned by usbliter8, mode {dev.get('mode', '?')}")
+            color = Colors.SUCCESS
+        else:
+            self.lbl_ich_dev.setText(
+                f"A12/A13 device: {self._dfu_device_name(dev)} — CPID "
+                f"{dev['cpid']} in {dev.get('mode', 'DFU')} but not pwned "
+                "(PWND should read usbliter8)")
+            color = Colors.DANGER
+        self.lbl_ich_dev.setStyleSheet(
+            f"font-size: 12px; font-weight: 600; color: {color};")
+        self._update_ich_ticket()
+
+    def _update_ich_chain_label(self) -> None:
+        info = ich.bootchain_info()
+        if not info:
+            self.lbl_ich_chain.setText("Bootchain: not built")
+            return
+        self.lbl_ich_chain.setText(
+            f"Bootchain: {info.get('product', '?')} iOS {info.get('version', '?')} "
+            f"({info.get('build', '?')}) — {info.get('kernel', '?')} kernel, "
+            f"{info.get('kpf_set', '?')}, trustcache "
+            f"{info.get('trustcache', '?')}")
+
+    def _on_ich_task_started(self, info) -> None:
+        if not info.task_id.startswith("ich_"):
+            return
+        self._ich_busy = True
+        self._dfu_timer.stop()
+        for btn in self._ich_buttons:
+            btn.setEnabled(False)
+
+    def _on_ich_task_finished(self, info) -> None:
+        if not info.task_id.startswith("ich_"):
+            return
+        self._ich_busy = False
+        for btn in self._ich_buttons:
+            btn.setEnabled(True)
+        self._update_ich_chain_label()
+        if self.tabs.currentWidget() is self._ich_tab:
+            self._dfu_timer.start()
+
+    def _ich_confirm(self, title: str, text: str) -> bool:
+        if self._ich_busy:
+            QMessageBox.information(
+                self, "Busy", "An A12/A13 operation is already running.")
+            return False
+        reply = QMessageBox.question(
+            self, title, text, QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No)
+        return reply == QMessageBox.Yes
+
+    def _start_ich_create(self) -> None:
+        version = self.cmb_ich_version.currentData()
+        if not version:
+            QMessageBox.warning(
+                self, "Pick a Version",
+                "Select the iOS version to build the bootchain from.")
+            return
+        if not ich.is_ich_device(self._ram_dev):
+            QMessageBox.warning(
+                self, "Unsupported Device",
+                "The A12/A13 flow targets CPID 0x8020 (A12) and 0x8030 (A13) "
+                "only.\n\nConnect an iPhone XR/XS or iPhone 11 in pwned DFU, "
+                "or use the SSH Ramdisk tab for A7-A11 / T2.")
+            return
+        if not self.txt_ich_ramdisk.text().strip():
+            QMessageBox.warning(
+                self, "Prepared Ramdisk Required",
+                "Growing and injecting an APFS ramdisk needs macOS, which "
+                "this app cannot do.\n\nPick the expanded, SSH-injected "
+                "ramdisk image produced by the upstream A12-A13-Ramdisk "
+                "toolkit first.")
+            return
+        if not self._ich_confirm(
+            "Create A12/A13 Bootchain",
+            f"Build a bootchain for {self._ram_dev.get('product', '?')} from "
+            f"iOS {version}?\n\nThis patches iBoot"
+            f"{' / iBSS' if self.chk_ich_ibss.isChecked() else ''}, the "
+            "kernel and the signature check, then signs everything with the "
+            "toolkit's APTicket.\n\nIt downloads several hundred MB on the "
+            "first run. The device must stay connected in pwned DFU.\n\n"
+            "⚠ Experimental — verify you can restore the device before "
+            "continuing.",
+        ):
+            return
+
+        toolkit = self.txt_ich_toolkit.text().strip()
+        prepared_rd = self.txt_ich_ramdisk.text().strip()
+        prepared_tc = self.txt_ich_trustcache.text().strip()
+        tc_mode = self.cmb_ich_tc.currentData() or "prepared"
+        kernel_mode = self.cmb_ich_kernel.currentData() or "patched"
+        kpf_set = self.cmb_ich_kpf.currentData() or "auto"
+        with_fw = self.chk_ich_fw.isChecked()
+        use_ibss = self.chk_ich_ibss.isChecked()
+        use_logo = self.chk_ich_logo.isChecked()
+        use_sep = self.chk_ich_sep.isChecked()
+
+        def run_job(progress_cb, log_cb, is_cancelled_cb):
+            ich.op_create(
+                str(version), toolkit, prepared_rd,
+                prepared_trustcache=prepared_tc, trustcache_mode=tc_mode,
+                kernel_mode=kernel_mode, kpf_set=kpf_set, with_fw=with_fw,
+                use_ibss=use_ibss, use_logo=use_logo, use_sep=use_sep,
+                progress_cb=progress_cb, log_cb=log_cb,
+                is_cancelled_cb=is_cancelled_cb)
+
+        tm = TaskManager.instance()
+        tm.start_task(
+            task_id=f"ich_create_{os.getpid()}",
+            title="Create A12/A13 Bootchain (EXPERIMENTAL)",
+            subtitle=f"iOS {version} — {self._ram_dev.get('product', '')}",
+            steps=ich.CREATE_STEPS,
+            worker_fn=run_job,
+        )
+
+    def _start_ich_boot(self) -> None:
+        if not self._ich_confirm(
+            "Boot A12/A13 Bootchain",
+            "Load the staged bootchain onto the connected device?\n\n"
+            "⚠ This patches the boot chain and forces a ramdisk boot — the "
+            "device will not boot iOS.\n\nThe device must already be in "
+            "Recovery: the usbliter8 jump out of DFU has to happen first, on "
+            "a machine with an RP2350.",
+        ):
+            return
+
+        def run_job(progress_cb, log_cb, is_cancelled_cb):
+            ich.op_boot(progress_cb, log_cb, is_cancelled_cb)
+
+        tm = TaskManager.instance()
+        tm.start_task(
+            task_id=f"ich_boot_{os.getpid()}",
+            title="Boot A12/A13 Bootchain (EXPERIMENTAL)",
+            subtitle=self._ram_dev.get("product", "") if self._ram_dev else "",
+            steps=ich.BOOT_STEPS,
+            worker_fn=run_job,
+        )
+
+    def _start_ich_mount(self) -> None:
+        if not self._ich_confirm(
+            "Mount Filesystems",
+            "Connect over SSH and run mount_ich (or mount_filesystems) to "
+            "mount every NAND volume?\n\n(Requires a booted ramdisk.)",
+        ):
+            return
+
+        def run_job(progress_cb, log_cb, is_cancelled_cb):
+            ich.op_mount(progress_cb, log_cb, is_cancelled_cb)
+
+        tm = TaskManager.instance()
+        tm.start_task(
+            task_id=f"ich_mount_{os.getpid()}",
+            title="Mount Filesystems (A12/A13)",
+            subtitle="root@localhost:2222",
+            steps=ich.MOUNT_STEPS,
+            worker_fn=run_job,
+        )
+
+    def _start_ich_console(self) -> None:
+        if not self._ich_confirm(
+            "Open SSH Console",
+            "Start iproxy and open an SSH console as root@localhost:2222? "
+            "(Requires a booted ramdisk.)",
+        ):
+            return
+
+        def run_job(progress_cb, log_cb, is_cancelled_cb):
+            ich.op_console(progress_cb, log_cb, is_cancelled_cb)
+
+        tm = TaskManager.instance()
+        tm.start_task(
+            task_id=f"ich_console_{os.getpid()}",
+            title="SSH Console (A12/A13)",
+            subtitle="root@localhost:2222",
+            steps=["Open Console"],
+            worker_fn=run_job,
+        )
+
+    def _start_ich_clean(self) -> None:
+        if not self._ich_confirm(
+            "Clean Workspace",
+            "Delete the staged A12/A13 bootchain and its scratch files?\n\n"
+            "The downloaded IPSW members are kept so the next build of the "
+            "same version is fast.",
+        ):
+            return
+
+        def run_job(progress_cb, log_cb, is_cancelled_cb):
+            ich.op_clean(progress_cb, log_cb, is_cancelled_cb)
+
+        tm = TaskManager.instance()
+        tm.start_task(
+            task_id=f"ich_clean_{os.getpid()}",
+            title="Clean A12/A13 Workspace",
+            subtitle=ich.ich_root(),
+            steps=ich.CLEAN_STEPS,
             worker_fn=run_job,
         )
