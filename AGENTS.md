@@ -180,9 +180,61 @@ pymobile3_gui/
   stream output use `subprocess.Popen` directly (`restore_backup`, `run_restore`,
   `run_streaming`); `StreamingProcessRunner` is only for event-loop threads.
 
+### DFU over USB on Windows (2026-10-05, first live iPhone 8 run)
+The bootchain reached a real device here; these cost hours and are all
+Windows/USB-specific, not logic bugs.
+- **`gaster` needs `USB_TIMEOUT`, and this build defaults it to 5 ms.** Its own
+  USB transfers cannot meet that, so `pwn` exits `-1` and `decrypt` returns
+  nothing. Measured: `decrypt_kbag` rc=1 at the default, rc=0 at
+  `USB_TIMEOUT=30000`. `GASTER_ENV` sets it for every gaster call.
+- **The Windows `gaster` build never exits after a successful `pwn`.** It pwns,
+  then lingers, so anything waiting on EOF hangs on the *success* path.
+  `gaster_pwn()` now skips entirely when `irecovery -q` already reports
+  `PWND: CHECKM8`, and otherwise bounds the call.
+- **A timeout passed to `run_streaming` only covers `proc.wait()` — which is
+  never reached when the child holds stdout open.** `_stream_output` blocks
+  first, so the timeout must bound the read loop too. This silently defeated
+  `PWN_TIMEOUT` until a child that sleeps forever was used as a test.
+- **Apple's DFU driver (`AppleUsbMux`, `oem41.inf`) binds the interface
+  exclusively**, so libusb never sees the device: `usb.core.find(idVendor=0x05AC)`
+  returns None and pyusb raises. Setting `DriverRank=0` on the libusbK package
+  does *not* win (Windows re-binds Apple on every re-enumeration), and
+  `pnputil /exclude-driver` does not exist on this build. `ensure_dfu_driver()`
+  applies libusbK with `pnputil /add-driver /install` immediately before each
+  pwn instead, which is enough for `gaster` — it does not make pyusb work.
+- **`usb_reset` (pyusb) fails, and PnP restart hands the device back to Apple.**
+  `usb_restart_device()` uses `pnputil /restart-device` as a fallback (needs
+  admin; the app already relaunches elevated). Note a reset *reverts* a manual
+  Zadig/libusbK swap — re-apply the driver after one.
+- **`gaster decrypt` is unusable here, so bootchain keys come from The Apple
+  Wiki.** Decrypt with the vendored Linux `img4 -k <ivkey>`, *not* pyimg4:
+  pyimg4 produced an identically-sized payload with different bytes and
+  `iBoot64Patcher` rejected it with `tihmstar::exception: assure failed`.
+  `firmware_keys.py` resolves the key page from `Firmware/iPhone/<major>.x` and
+  decrypts locally, so nothing needs the device's GID0 key over USB.
+- Only `iBSS`/`iBEC` are KBAG-wrapped (`30 83 10 90`); the ramdisk, kernelcache,
+  DeviceTree and trustcache are plain IM4P and plain `img4 -i` handles them.
+  A missing key must raise, never fall through to an undecrypted image — that
+  would flash garbage iBoot.
+- **`wsl_arg` must fix relative paths too, not just `C:\...`.** WSL rewrites cwd
+  but not argv, so `work\iBSS.im4p` reached Linux verbatim and `img4` failed
+  with `cannot open`. This silently affected *every* `wsl_tool` call using a
+  relative path, including the `darwin >= 24` branch.
+- **Aborting the shell kills the whole process tree, including detached
+  `Start-Process` children.** Long runs must be launched via
+  `Invoke-CimMethod Win32_Process Create` or an elevated shell, or they die with
+  the command that started them.
+- **Live status on iPhone10,4 / iOS 16.0.3:** `op_create` completes (all 8
+  artifacts), `op_boot` boots the ramdisk, and SSH works as root
+  (`Darwin 22.0.0 ... RELEASE_ARM64_T8015`). Mounting `/var/mobile` does *not*
+  work: only `/dev/disk0s1` exists with no APFS slices and the ramdisk root is
+  mounted read-only, so no mountpoint can be created. `sshrd.sh` only adds
+  `nand-enable-reformat=1 -restore` for T2 (`0x8960`/`0x7000`/`0x7001`), so
+  NAND bootargs are never applied for A7–A11 — see Known Gaps.
+
 ## Active Development
 
-### SSH Ramdisk — implemented, merged to `master`, untested on hardware
+### SSH Ramdisk — build + boot verified on hardware (iPhone10,4 / iOS 16.0.3)
 - Ports SSHRD_Script (checkm8, A7-A11/T2) into the GUI:
   - `core/backend/ramdisk_manager.py` — `op_create`, `op_boot`, `op_reset`,
     `op_reboot`, `op_dump_blobs`, `op_clean`, `open_ssh_console`; failures
@@ -192,9 +244,13 @@ pymobile3_gui/
   - **Hybrid execution:** file/patch steps run vendored Linux tools in WSL
     (`wsl_tool`); DFU/USB steps run vendored Windows exes (`native_tool`:
     gaster, irecovery, iproxy). No usbipd/usb passthrough.
+  - **Bootchain decryption does not use the device.** `gaster decrypt` needs the
+    GID0 key over USB and does not work reliably on Windows, so
+    `core/backend/firmware_keys.py` fetches iBSS/iBEC IV+Key from The Apple Wiki
+    and decrypts with `img4 -k`. Only builds with published keys are supported;
+    a missing key is a hard error naming the build.
   - `gaster reset` does not exist in any Windows gaster build — `usb_reset()`
-    issues libusb `reset_device` via pyusb instead (vendored
-    `assets/sshrd/win/libusb-1.0.dll`).
+    (pyusb) with `usb_restart_device()` (`pnputil /restart-device`) as fallback.
   - Assets vendored at `pymobile3_gui/assets/sshrd/` (`Linux/`, `win/`,
     `shsh/`, `sshtars/`, `bootlogo.im4p`), shipped via the spec's `datas`;
     `.gitignore` carries a negation for `sshtars/*.tar.gz`.
@@ -202,15 +258,24 @@ pymobile3_gui/
     `irecovery -q` DFU poll (QProcess, only while the tab is visible),
     ipsw.me version combo fetched off-thread, iOS 16.1+ build-block warning,
     busy-state disables all seven action buttons.
-  - Tests: `tests/` — 64 offline tests (sshrd.sh decision tables, manifest
-    parsing, argv construction with `run_streaming` stubbed, offscreen tab
-    smoke). **No checkm8 device has ever run it** — the only test phone is
-    an A16, so pwn/boot/erase/dump all remain unverified live.
+  - Tests: `tests/` — 128 offline tests (sshrd.sh decision tables, manifest
+    parsing, key-page parsing, argv construction with `run_streaming` stubbed,
+    a hang regression test, offscreen tab smoke).
+  - **Verified live** on iPhone10,4: `op_create` → 8 artifacts; `op_boot` →
+    SSH root shell. `op_reset` (data erase), `op_dump_blobs` and `op_clean` are
+    still unverified on checkm8 hardware.
 
 ## Known Gaps (from docs/TODO.md)
 
-One feature gap from RootForgeKit remains unported:
+Two gaps remain:
 - Frozen binary verification (PyInstaller build not yet tested end-to-end)
+- **Mounting `/var/mobile` in the SSH ramdisk.** On iPhone10,4 / iOS 16.0.3 the
+  ramdisk boots and SSH works as root, but the NAND data volume is not exposed:
+  only `/dev/disk0s1` appears with no APFS slices, and the ramdisk root is
+  mounted read-only so no mountpoint can be created. `sshrd.sh` only passes
+  `nand-enable-reformat=1 -restore` for T2, so A7–A11 never get NAND bootargs.
+  Needs iBEC bootargs beyond what the script uses, and is unverified for any
+  device.
 
 Ported and verified: lockdown control panel, crash reports explorer, backup
 restore-to-device, DVT instruments (kill/launch/sysmon/power assertion — the

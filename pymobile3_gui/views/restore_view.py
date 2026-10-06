@@ -24,6 +24,7 @@ from pymobile3_gui.core.backend.backup_engine import (
     resolve_backup_source, restore_backup
 )
 from pymobile3_gui.core.backend import ramdisk_manager as ram
+from pymobile3_gui.core.backend import device_ident as ident
 
 
 class RestoreView(QWidget):
@@ -781,6 +782,22 @@ class RestoreView(QWidget):
             self._ram_versions_product = product
             self._ram_refresh_versions()
 
+    def _dfu_device_name(self, dev: dict) -> str:
+        """Name the DFU device from product/model when irecovery gave them.
+
+        irecovery does not report product type or board id, so fall back to
+        the CPID table to say what the hardware actually is.
+        """
+        label = dev.get("name") or ""
+        if label:
+            return label
+        label = dev.get("product") or ""
+        if label and dev.get("model"):
+            return f"{label} ({dev['model']})"
+        if label:
+            return label
+        return ident.name(dev.get("cpid", "")) or "Unknown device"
+
     def _update_ram_dfu_label(self) -> None:
         dev = self._ram_dev
         if not dev:
@@ -789,13 +806,12 @@ class RestoreView(QWidget):
             color = Colors.TEXT_SECONDARY
         elif dev["cpid"] in ram.CHECKM8_CPIDS:
             self.lbl_ram_dfu.setText(
-                f"DFU device: {dev.get('product') or '?'} "
-                f"({dev.get('model') or '?'}) — CPID {dev['cpid']}, "
-                "checkm8 capable")
+                f"DFU device: {self._dfu_device_name(dev)} — "
+                f"CPID {dev['cpid']}, checkm8 capable")
             color = Colors.SUCCESS
         else:
             self.lbl_ram_dfu.setText(
-                f"DFU device: {dev.get('product') or '?'} — CPID "
+                f"DFU device: {self._dfu_device_name(dev)} — CPID "
                 f"{dev['cpid']} is not checkm8 (A7–A11 / T2); "
                 "ramdisk operations unavailable")
             color = Colors.DANGER
@@ -910,10 +926,12 @@ class RestoreView(QWidget):
                 "and wait for the status line to turn green.")
             return False
         if dev["cpid"] not in ram.CHECKM8_CPIDS:
+            known = ident.describe(dev["cpid"])
             QMessageBox.warning(
                 self, "Unsupported Device",
-                f"CPID {dev['cpid']} is not a checkm8 target (A7–A11 / T2), "
-                "so it cannot build or boot an SSH ramdisk.")
+                f"{known or 'This device'} (CPID {dev['cpid']}) is not a "
+                "checkm8 target (A7–A11 / T2), so it cannot build or boot an "
+                "SSH ramdisk.")
             return False
         return True
 

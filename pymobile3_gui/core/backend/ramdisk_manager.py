@@ -37,6 +37,7 @@ from typing import Callable, Optional
 
 import requests
 
+from pymobile3_gui.core.backend import firmware_keys
 from pymobile3_gui.core.backend.paths import data_dir, documents_dir, resource_path
 
 LogCb = Callable[[str], None]
@@ -50,7 +51,6 @@ CHECKM8_CPIDS = {
 GO_AFTER_IBEC = {"0x8010", "0x8011", "0x8012", "0x8015"}
 NAND_REFORMAT_CPIDS = {"0x8960", "0x7000", "0x7001"}
 
-ZERO_KBAG = "0" * 128
 IPSW_API = "https://api.ipsw.me/v4/device/{product}?type=ipsw"
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 TOOL_PROGRESS_RE = re.compile(r"^\s*\d+%\s*\[")
@@ -68,6 +68,21 @@ CLEAN_STEPS = ["Clean Workspace"]
 
 class RamdiskError(Exception):
     """User-facing failure in a ramdisk operation."""
+
+
+class RamdiskTimeout(RamdiskError):
+    """A tool outlived its timeout. Distinct from a tool that failed."""
+
+
+# gaster pwn is a USB bootrom exploit; it normally lands in a few seconds.
+# The Windows build does not always exit once it has, so this is the window
+# we allow before we stop it and go by the device's own PWND state instead.
+PWN_TIMEOUT = 90.0
+
+# gaster's USB_TIMEOUT is in milliseconds and this build defaults it to 5 ms,
+# which every USB transfer blows through, so `pwn` and `decrypt` fail (or hang)
+# unless it is raised. Measured: rc=1 at the default, rc=0 at 30 s.
+GASTER_ENV = {"USB_TIMEOUT": "30000"}
 
 
 # -----------------------------------------------------------------------------
@@ -145,15 +160,19 @@ def sh_quote(value: str) -> str:
 
 def wsl_arg(value: str) -> str:
     """
-    Translate absolute Windows paths among tool args to /mnt/<drive>/ form.
+    Translate Windows path separators in tool args to POSIX form.
 
     WSL rewrites cwd but never rewrites argv, so a raw C:\\... path would
-    reach a Linux binary as a relative filename and fail to open. Drive
-    letters only occur on genuine paths (URLs, hex bags, boot-args are
-    untouched), so the prefix test is enough.
+    reach a Linux binary as a relative filename and fail to open. Relative
+    paths need the same treatment for the separator: `work\\iBSS.im4p` reaches
+    the Linux side verbatim and `open()` rejects the backslash. Drive letters
+    only occur on genuine paths (URLs, hex bags, boot-args are untouched), so
+    the prefix test is enough.
     """
     if re.match(r"^[A-Za-z]:[\\/]", value):
         return win_to_wsl(value)
+    if "\\" in value and "://" not in value:
+        return value.replace("\\", "/")
     return value
 
 
@@ -178,6 +197,7 @@ def _stream_output(
     log_cb: LogCb,
     is_cancelled_cb: CancelCb,
     on_line: Optional[Callable[[str], None]] = None,
+    deadline: Optional[float] = None,
 ) -> None:
     lines: "queue.Queue[Optional[str]]" = queue.Queue()
 
@@ -193,6 +213,16 @@ def _stream_output(
         try:
             line = lines.get(timeout=0.25)
         except queue.Empty:
+            # The timeout has to cover this wait, not just proc.wait(): a tool
+            # that never closes stdout (the Windows gaster build lingers after
+            # pwning) would otherwise block here forever and the caller's
+            # timeout would never be reached.
+            if deadline is not None and time.monotonic() > deadline:
+                if proc.poll() is None:
+                    raise RamdiskTimeout(
+                        "tool produced no output and did not exit")
+                # Exited without closing the pipe; fall through to proc.wait().
+                return
             continue
         if line is None:
             return
@@ -213,25 +243,31 @@ def run_streaming(
     allow_failure: bool = False,
     context: str = "",
     timeout: Optional[float] = None,
+    extra_env: Optional[dict] = None,
 ) -> int:
     """Run a tool, streaming merged output to log_cb. Raises on bad rc."""
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    child_env = None
+    if extra_env:
+        child_env = {**os.environ, **extra_env}
     try:
         proc = subprocess.Popen(
             cmd, cwd=cwd, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
-            creationflags=creationflags,
+            creationflags=creationflags, env=child_env,
         )
     except OSError as e:
         raise RamdiskError(f"Failed to launch {cmd[0]}: {e}")
     try:
-        _stream_output(proc, log_cb, is_cancelled_cb)
+        _stream_output(
+            proc, log_cb, is_cancelled_cb,
+            deadline=(time.monotonic() + timeout) if timeout else None)
         rc = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-        raise RamdiskError(f"{context or cmd[0]} timed out after {timeout}s")
+        raise RamdiskTimeout(f"{context or cmd[0]} timed out after {timeout}s")
     except RamdiskError:
         # Cancellation raises out of _stream_output with no finally on the
         # Popen, so the child keeps running (a half-downloaded IPSW would keep
@@ -328,12 +364,13 @@ def native_tool(
     allow_failure: bool = False,
     context: str = "",
     timeout: Optional[float] = None,
+    extra_env: Optional[dict] = None,
 ) -> int:
     """Run a vendored native Windows executable (cwd = run root)."""
     return run_streaming(
         [win_tool(tool), *args], cwd=run_root(), log_cb=log_cb,
         is_cancelled_cb=is_cancelled_cb, allow_failure=allow_failure,
-        context=context or tool, timeout=timeout,
+        context=context or tool, timeout=timeout, extra_env=extra_env,
     )
 
 
@@ -357,8 +394,10 @@ def parse_device_info(text: str) -> Optional[dict]:
         "cpid": cpid,
         "model": info.get("model", ""),
         "product": info.get("product", ""),
+        "name": info.get("name", ""),
         "ecid": info.get("ecid", ""),
         "mode": info.get("mode", ""),
+        "pwned": info.get("pwnd", "").upper() == "CHECKM8",
     }
 
 
@@ -390,23 +429,53 @@ def wait_for_device(log_cb: LogCb, is_cancelled_cb: CancelCb) -> dict:
 # gaster / USB helpers
 # -----------------------------------------------------------------------------
 
-def gaster_pwn(log_cb: LogCb, is_cancelled_cb: CancelCb) -> None:
+def is_pwned(log_cb: LogCb) -> bool:
+    """Ask the DFU device whether checkm8 pwning is still in effect."""
+    dev = detect_device()
+    return bool(dev and dev["pwned"])
+
+
+def gaster_pwn(log_cb: LogCb, is_cancelled_cb: CancelCb) -> bool:
+    """
+    Put the device into pwned DFU mode.
+
+    Returns True when this call performed the pwn (the caller then needs a USB
+    reset to re-enumerate), False when the device was already pwned.
+    """
+    # Pwning is already in effect (a previous run, or the user in another
+    # tool). Re-running gaster would re-exploit the device for nothing and on
+    # some builds wedges it, so skip straight past it.
+    if is_pwned(log_cb):
+        log_cb("[*] Device already pwned (PWND: CHECKM8) — skipping gaster pwn")
+        return False
+
     log_cb("[*] Pwning device with gaster (checkm8)...")
-    native_tool("gaster", ["pwn"], log_cb=log_cb,
-                is_cancelled_cb=is_cancelled_cb, context="gaster pwn")
-
-
-def gaster_decrypt_kbag(log_cb: LogCb, is_cancelled_cb: CancelCb) -> None:
-    # sshrd.sh runs this with `|| true` — A10X/T2 workaround, best effort.
-    native_tool("gaster", ["decrypt_kbag", ZERO_KBAG], log_cb=log_cb,
-                is_cancelled_cb=is_cancelled_cb, allow_failure=True,
-                context="gaster decrypt_kbag")
-
-
-def gaster_decrypt(src: str, dst: str, log_cb: LogCb,
-                   is_cancelled_cb: CancelCb) -> None:
-    native_tool("gaster", ["decrypt", src, dst], log_cb=log_cb,
-                is_cancelled_cb=is_cancelled_cb, context="gaster decrypt")
+    # gaster talks to the device over libusb, so it must not be sitting behind
+    # Apple's DFU driver. Best effort: on a device that is already pwned we are
+    # about to skip the pwn anyway, and a permission problem here should not
+    # stop an operation that does not need it.
+    try:
+        ensure_dfu_driver(log_cb)
+    except RamdiskError as exc:
+        log_cb(f"[!] {exc}")
+    # The Windows gaster build pwns successfully but then lingers instead of
+    # exiting, so waiting on EOF hangs forever on a successful pwn. Bound it
+    # and settle on what the device itself reports: irecovery reflects
+    # PWND: CHECKM8 as soon as the exploit lands.
+    try:
+        native_tool("gaster", ["pwn"], log_cb=log_cb,
+                    is_cancelled_cb=is_cancelled_cb, context="gaster pwn",
+                    timeout=PWN_TIMEOUT, extra_env=GASTER_ENV)
+    except RamdiskTimeout:
+        if not is_pwned(log_cb):
+            raise RamdiskError(
+                "gaster pwn did not take effect within "
+                f"{PWN_TIMEOUT:.0f}s. Check that the DFU driver is the "
+                "winra1n/libusb driver (Zadig) and that the device is still "
+                "in DFU mode.") from None
+        log_cb("[*] gaster pwn took effect; the tool lingered after pwning "
+               "and was terminated — continuing.")
+    return True
 
 
 def usb_reset(log_cb: LogCb) -> None:
@@ -453,6 +522,67 @@ def usb_reset(log_cb: LogCb) -> None:
     except usb.core.USBError as e:
         raise RamdiskError(f"USB reset failed: {e}")
     log_cb("[*] USB device reset (gaster reset equivalent).")
+
+
+def ensure_dfu_driver(log_cb: LogCb) -> None:
+    """
+    Make sure the DFU interface is bound to a libusb-style driver.
+
+    `gaster` reaches the device through libusb, and Apple's DFU driver
+    (AppleUsbMux, service WINUSB) binds the interface exclusively, so a pwn
+    attempt against it hangs instead of failing. Applying the already-registered
+    libusbK package to the matching hardware id is the scripted equivalent of
+    choosing it in Zadig. Windows re-binds Apple's driver on the next
+    re-enumeration, so this runs immediately before each pwn. Needs admin.
+    """
+    script = (
+        "$inf = 'C:\\Windows\\INF\\oem6.inf'; "
+        "if (-not (Test-Path $inf)) { exit 3 }; "
+        "pnputil /add-driver $inf /install"
+    )
+    rc, out = run_capture(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        timeout=60)
+    lowered = out.lower()
+    if "access is denied" in lowered:
+        raise RamdiskError(
+            "Switching the DFU driver to libusbK needs administrator rights.")
+    if "total driver packages" not in lowered and rc != 0:
+        raise RamdiskError(f"Could not apply the libusbK driver: {out.strip()}")
+    log_cb("[*] DFU driver set to libusbK (libusb) for gaster.")
+
+
+def usb_restart_device(log_cb: LogCb) -> None:
+    """
+    Re-enumerate the DFU device via `pnputil /restart-device`.
+
+    Fallback for `usb_reset` when pyusb cannot claim the device, which is the
+    normal case on Windows: Apple's DFU driver binds the interface exclusively,
+    so libusb never sees it however the driver rank is set. PnP restarts the
+    node regardless of which driver owns it, which is the re-enumeration
+    `gaster reset` performs. Needs administrator rights.
+    """
+    if detect_device() is None:
+        raise RamdiskError(
+            "Cannot restart the DFU device: it is not responding.")
+    script = (
+        "$d = Get-PnpDevice -PresentOnly | "
+        "Where-Object { $_.InstanceId -like 'USB\\VID_05AC&PID_1227*' } | "
+        "Select-Object -First 1; "
+        "if (-not $d) { exit 2 }; "
+        "pnputil /restart-device $d.InstanceId"
+    )
+    rc, out = run_capture(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        timeout=45)
+    lowered = out.lower()
+    if "access is denied" in lowered:
+        raise RamdiskError(
+            "pnputil /restart-device needs administrator rights")
+    if "successfully" not in lowered:
+        raise RamdiskError(
+            f"pnputil /restart-device did not report success: {out.strip()}")
+    log_cb("[*] DFU device restarted via pnputil (gaster reset equivalent).")
 
 
 # -----------------------------------------------------------------------------
@@ -548,6 +678,38 @@ def resolve_ipsw_url(product: str, version: str) -> str:
     raise RamdiskError(
         f"No IPSW for {product} version {version} on ipsw.me "
         f"(recent: {known}...)")
+
+
+def build_number_from_ipsw_url(url: str) -> str:
+    """
+    Pull the build number out of an IPSW filename.
+
+    Apple names them `<product>_<board>_<version>_<build>_Restore.ipsw`, and the
+    key pages are indexed by build, so the build has to come from the URL rather
+    than being asked for separately.
+    """
+    match = re.search(r"_(\d{2}[A-Za-z]\d{3,4})_Restore\.ipsw", url)
+    if not match:
+        raise RamdiskError(f"Could not determine the build number from {url}")
+    return match.group(1)
+
+
+def _decrypt_bootchain_image(
+    src: str, dst: str, keys: dict, root: str,
+    log_cb: LogCb, is_cancelled_cb: CancelCb,
+) -> None:
+    """Decrypt one KBAG-wrapped bootchain image using Apple Wiki keys."""
+    _check_cancel(is_cancelled_cb)
+    name = os.path.basename(src)
+    component = firmware_keys.lookup_key(keys, name)
+    if component is None:
+        raise RamdiskError(
+            f"The Apple Wiki publishes no keys for {name}, "
+            "so it cannot be decrypted on this machine.")
+    wsl_tool("img4", ["-i", src, "-o", dst, "-k", firmware_keys.ivkey(component)],
+             cwd=root, log_cb=log_cb, is_cancelled_cb=is_cancelled_cb,
+             context=f"img4 -k ({name})")
+    log_cb(f"[*] {name} -> {os.path.basename(dst)} ({component.component} key)")
 
 
 # -----------------------------------------------------------------------------
@@ -707,8 +869,11 @@ def op_create(
     sshramdisk_dir()
 
     progress_cb(12, step="Fetch Firmware", detail="Pwning device...")
+    # sshrd.sh also runs `gaster decrypt_kbag 000...0 || true` here (an A10X/T2
+    # workaround). It is deliberately not ported: on this gaster build it
+    # produces no output and no kbag, it was called without a timeout so it can
+    # hang, and the keys it would cache are now fetched from The Apple Wiki.
     gaster_pwn(log_cb, is_cancelled_cb)
-    gaster_decrypt_kbag(log_cb, is_cancelled_cb)
     wsl_tool("img4tool", ["-e", "-s", shsh, "-m", os.path.join("work", "IM4M")],
              cwd=root, log_cb=log_cb, is_cancelled_cb=is_cancelled_cb,
              context="img4tool (SHSH -> IM4M)")
@@ -772,10 +937,24 @@ def op_create(
                  cwd=root, log_cb=log_cb, is_cancelled_cb=is_cancelled_cb,
                  context="img4 (iBEC)")
     else:
-        gaster_decrypt(ibss_file, os.path.join("work", "iBSS.dec"), log_cb,
-                       is_cancelled_cb)
-        gaster_decrypt(ibec_file, os.path.join("work", "iBEC.dec"), log_cb,
-                       is_cancelled_cb)
+        # sshrd.sh uses `gaster decrypt` here, which drives the device's AES
+        # engine over USB. That is unreliable on Windows, so take the bootchain
+        # keys from The Apple Wiki and decrypt locally instead.
+        build = build_number_from_ipsw_url(ipsw_url)
+        progress_cb(55, step="Patch Bootchain",
+                    detail=f"Fetching firmware keys for {build}...")
+        try:
+            keys = firmware_keys.fetch_component_keys(
+                build, product, major)
+        except firmware_keys.FirmwareKeyError as exc:
+            raise RamdiskError(
+                f"{exc}\n\nThe Apple Wiki has no published keys for this "
+                "build, so it cannot be built without device-side "
+                "decryption.") from exc
+        for src in (ibss_file, ibec_file):
+            _decrypt_bootchain_image(src, os.path.join("work", os.path.basename(
+                src).split(".")[0] + ".dec"), keys, root, log_cb,
+                is_cancelled_cb)
 
     wsl_tool("iBoot64Patcher",
              [os.path.join("work", "iBSS.dec"), os.path.join("work", "iBSS.patched")],
@@ -931,6 +1110,33 @@ def _require_built() -> None:
         raise RamdiskError("Create an SSH ramdisk first.")
 
 
+def _pwn_and_settle(log_cb: LogCb, is_cancelled_cb: CancelCb) -> None:
+    """
+    Ensure the device is pwned, then re-enumerate only if we had to pwn it.
+
+    The reset also hands the device back to Apple's DFU driver, which hides it
+    from libusb, and it needs a driver we do not necessarily control. So it is
+    both conditional and best-effort: a failure here must not stop us when
+    `irecovery` can still reach the device and will say so if it cannot.
+    """
+    if not gaster_pwn(log_cb, is_cancelled_cb):
+        log_cb("[*] Already pwned; skipping USB reset")
+        return
+    try:
+        usb_reset(log_cb)
+        return
+    except RamdiskError as exc:
+        log_cb(f"[!] libusb reset unavailable ({exc})")
+    # Fall back to a PnP restart, which works even when Apple's DFU driver
+    # holds the interface away from libusb. Needs admin; the app already
+    # relaunches elevated for the iOS 17+ tunnel.
+    try:
+        usb_restart_device(log_cb)
+    except RamdiskError as exc:
+        log_cb(f"[!] PnP restart failed ({exc}); continuing — irecovery will "
+               "report if the device is really unreachable.")
+
+
 def op_boot(
     progress_cb: ProgressCb, log_cb: LogCb, is_cancelled_cb: CancelCb,
 ) -> None:
@@ -945,8 +1151,7 @@ def op_boot(
     dm = darwin_major_for(cpid, major)
 
     progress_cb(25, step="Pwn Device", detail="gaster pwn + USB reset")
-    gaster_pwn(log_cb, is_cancelled_cb)
-    usb_reset(log_cb)
+    _pwn_and_settle(log_cb, is_cancelled_cb)
 
     sd = sshramdisk_dir()
     progress_cb(45, step="Send Bootchain", detail="iBSS -> iBEC")
@@ -1004,8 +1209,7 @@ def op_reset(
     cpid = dev["cpid"]
 
     progress_cb(25, step="Pwn Device", detail="gaster pwn + USB reset")
-    gaster_pwn(log_cb, is_cancelled_cb)
-    usb_reset(log_cb)
+    _pwn_and_settle(log_cb, is_cancelled_cb)
 
     progress_cb(50, step="Send Bootchain", detail="iBSS -> iBEC")
     native_tool("irecovery", ["-f", os.path.join("sshramdisk", "iBSS.img4")],

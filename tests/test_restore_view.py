@@ -45,17 +45,42 @@ def test_ramdisk_action_buttons_present(view):
     assert view.cmb_ram_version.count() >= 1
 
 
+def _dev(**over):
+    base = {"cpid": "0x8010", "model": "d221ap", "product": "iPhone10,3",
+            "name": "", "ecid": "", "mode": "DFU"}
+    base.update(over)
+    return base
+
+
 def test_dfu_label_checkm8_device(view):
-    view._ram_dev = {"cpid": "0x8010", "model": "d221ap",
-                     "product": "iPhone10,3", "ecid": "", "mode": "DFU"}
+    view._ram_dev = _dev()
     view._update_ram_dfu_label()
     assert "checkm8 capable" in view.lbl_ram_dfu.text()
     assert "iPhone10,3" in view.lbl_ram_dfu.text()
 
 
+def test_dfu_label_prefers_irecovery_name(view):
+    view._ram_dev = _dev(name="iPhone 8 (GSM)")
+    view._update_ram_dfu_label()
+    assert "iPhone 8 (GSM)" in view.lbl_ram_dfu.text()
+
+
+def test_dfu_label_falls_back_to_cpid_table(view):
+    # No name and no product: the CPID table has to identify the hardware.
+    view._ram_dev = _dev(cpid="0x8015", product="", model="")
+    view._update_ram_dfu_label()
+    assert "iPhone 8 / iPhone 8 Plus / iPhone X" in view.lbl_ram_dfu.text()
+
+
+def test_dfu_label_unknown_cpid_says_unknown_device(view):
+    view._ram_dev = _dev(cpid="0xdead", product="", model="")
+    view._update_ram_dfu_label()
+    assert "Unknown device" in view.lbl_ram_dfu.text()
+    assert "not checkm8" in view.lbl_ram_dfu.text()
+
+
 def test_dfu_label_rejects_a16(view):
-    view._ram_dev = {"cpid": "0x8747", "model": "t8030ap",
-                     "product": "iPhone12,1", "ecid": "", "mode": "DFU"}
+    view._ram_dev = _dev(cpid="0x8747", model="t8030ap", product="iPhone12,1")
     view._update_ram_dfu_label()
     assert "not checkm8" in view.lbl_ram_dfu.text()
 
@@ -67,8 +92,7 @@ def test_dfu_label_no_device(view):
 
 
 def test_version_warn_blocks_ios_16_1_and_newer(view):
-    view._ram_dev = {"cpid": "0x8010", "model": "d221ap",
-                     "product": "iPhone10,3", "ecid": "", "mode": "DFU"}
+    view._ram_dev = _dev()
     _set_version(view, "16.1")
     view._update_ram_version_warn()
     assert not view.lbl_ram_version_warn.isHidden()

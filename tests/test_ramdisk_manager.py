@@ -7,6 +7,7 @@ sshrd.sh's decision table (go / trustcache / nand-reformat) without hardware.
 
 import os
 import plistlib
+import sys
 
 import pytest
 
@@ -50,6 +51,14 @@ SAMPLE_IRECOVERY = (
     "ECID: 0x1122334455667788\n"
 )
 
+# Older irecovery builds omit NAME, so the CPID table has to cover for them.
+SAMPLE_IRECOVERY_NO_NAME = (
+    "CPID: 0x8015\n"
+    "MODE: DFU\n"
+    "PRODUCT: iPhone10,4\n"
+    "MODEL: d201ap\n"
+)
+
 
 def test_parse_device_info_full():
     dev = ram.parse_device_info(SAMPLE_IRECOVERY)
@@ -58,6 +67,16 @@ def test_parse_device_info_full():
     assert dev["product"] == "iPhone10,3"
     assert dev["model"] == "d221ap"
     assert dev["mode"] == "DFU"
+
+
+def test_parse_device_info_reads_name_when_present():
+    dev = ram.parse_device_info("CPID: 0x8015\nNAME: iPhone 8 (GSM)\n")
+    assert dev["name"] == "iPhone 8 (GSM)"
+
+
+def test_parse_device_info_name_defaults_to_empty():
+    dev = ram.parse_device_info(SAMPLE_IRECOVERY_NO_NAME)
+    assert dev["name"] == ""
 
 
 def test_parse_device_info_rejects_error_output():
@@ -357,6 +376,174 @@ def test_native_tool_runs_vendored_exe_from_run_root(monkeypatch):
     assert seen["cwd"] == ram.run_root()
 
 
+def test_wsl_arg_normalises_relative_path_separators():
+    # WSL rewrites cwd but not argv, so a relative Windows path reaches the
+    # Linux binary verbatim and open() rejects the backslash.
+    assert ram.wsl_arg(r"work\iBSS.d20.RELEASE.im4p") == \
+        "work/iBSS.d20.RELEASE.im4p"
+    assert ram.wsl_arg(r"work\iBSS.dec") == "work/iBSS.dec"
+
+
+def test_wsl_arg_leaves_non_paths_alone():
+    # Boot-args, URLs and hex ivkeys must survive untouched.
+    boot_args = "rd=md0 debug=0x2014e -v wdt=-1"
+    assert ram.wsl_arg(boot_args) == boot_args
+    url = "https://updates.cdn-apple.com/a/b.ipsw"
+    assert ram.wsl_arg(url) == url
+    ivkey = "0b62971cc8919dcd" + "0" * 64
+    assert ram.wsl_arg(ivkey) == ivkey
+
+
+def test_pwn_and_settle_skips_reset_when_already_pwned(monkeypatch):
+    """A device that is already pwned must not be reset: the reset hands it
+    back to Apple's DFU driver, which then hides it from libusb."""
+    monkeypatch.setattr(ram, "gaster_pwn", lambda *a: False)
+    monkeypatch.setattr(
+        ram, "usb_reset",
+        lambda *a: pytest.fail("usb_reset must not run for an already-pwned device"))
+
+    logs = []
+    ram._pwn_and_settle(logs.append, lambda: False)
+    assert any("skipping USB reset" in m for m in logs)
+
+
+def test_pwn_and_settle_tolerates_reset_failure(monkeypatch):
+    """irecovery can still reach the device, so a failed reset is not fatal."""
+    monkeypatch.setattr(ram, "gaster_pwn", lambda *a: True)
+
+    def boom(log_cb):
+        raise ram.RamdiskError("USB reset failed: Input/Output Error")
+
+    monkeypatch.setattr(ram, "usb_reset", boom)
+    logs = []
+    ram._pwn_and_settle(logs.append, lambda: False)
+    assert any("USB reset failed" in m for m in logs)
+
+
+def test_gaster_pwn_reports_whether_it_pwned(monkeypatch):
+    monkeypatch.setattr(ram, "detect_device",
+                        lambda: {"cpid": "0x8015", "pwned": True})
+    monkeypatch.setattr(ram, "native_tool", lambda *a, **k: 0)
+    assert ram.gaster_pwn(lambda m: None, lambda: False) is False
+
+    state = {"pwned": False}
+    monkeypatch.setattr(
+        ram, "detect_device",
+        lambda: {"cpid": "0x8015", "pwned": state["pwned"]})
+
+    def fake_native(tool, args, **kwargs):
+        state["pwned"] = True
+        return 0
+
+    monkeypatch.setattr(ram, "native_tool", fake_native)
+    assert ram.gaster_pwn(lambda m: None, lambda: False) is True
+
+
+def test_pwn_and_settle_falls_back_to_pnp_restart(monkeypatch):
+    """Apple's DFU driver hides the device from libusb, so a failed libusb
+    reset must fall through to a PnP restart rather than being fatal."""
+    monkeypatch.setattr(ram, "gaster_pwn", lambda *a: True)
+    monkeypatch.setattr(
+        ram, "usb_reset",
+        lambda *a: (_ for _ in ()).throw(ram.RamdiskError("no Apple USB device")))
+    seen = []
+    monkeypatch.setattr(ram, "usb_restart_device", seen.append)
+    logs = []
+    ram._pwn_and_settle(logs.append, lambda: False)
+    assert seen == [logs.append]
+    assert any("libusb reset unavailable" in m for m in logs)
+
+
+def test_usb_restart_device_reports_permission_problem(monkeypatch):
+    monkeypatch.setattr(ram, "detect_device", lambda: {"cpid": "0x8015"})
+    monkeypatch.setattr(
+        ram, "run_capture",
+        lambda *a, **k: (1, "Failed to restart device: Access is denied."))
+    with pytest.raises(RamdiskError, match="administrator"):
+        ram.usb_restart_device(lambda m: None)
+
+
+def test_usb_restart_device_requires_device_present(monkeypatch):
+    monkeypatch.setattr(ram, "detect_device", lambda: None)
+    with pytest.raises(RamdiskError, match="not responding"):
+        ram.usb_restart_device(lambda m: None)
+
+
+def test_run_streaming_timeout_covers_a_tool_that_never_exits(tmp_path):
+    """The Windows gaster build lingers after pwning and never closes stdout.
+
+    A timeout applied only to proc.wait() is never reached, because reading the
+    output blocks first -- so the streaming wait has to be bounded too.
+    """
+    script = tmp_path / "hang.py"
+    script.write_text("import time\nwhile True: time.sleep(0.2)\n")
+
+    logs = []
+    with pytest.raises(ram.RamdiskTimeout):
+        ram.run_streaming(
+            [sys.executable, str(script)], cwd=None,
+            log_cb=logs.append, is_cancelled_cb=lambda: False,
+            context="hang", timeout=1.5)
+
+
+def test_run_streaming_completes_when_child_exits(tmp_path):
+    script = tmp_path / "quick.py"
+    script.write_text("print('hello')\n")
+    logs = []
+    rc = ram.run_streaming(
+        [sys.executable, str(script)], cwd=None,
+        log_cb=logs.append, is_cancelled_cb=lambda: False, timeout=30)
+    assert rc == 0
+    assert any("hello" in m for m in logs)
+
+
+def test_ensure_dfu_driver_reports_permission_problem(monkeypatch):
+    monkeypatch.setattr(
+        ram, "run_capture",
+        lambda *a, **k: (1, "Access is denied."))
+    with pytest.raises(ram.RamdiskError, match="administrator"):
+        ram.ensure_dfu_driver(lambda m: None)
+
+
+def test_gaster_pwn_raises_usb_timeout_env(monkeypatch):
+    """This gaster build defaults USB_TIMEOUT to 5 ms, which its own USB
+    transfers cannot meet -- pwn/decrypt fail or hang unless it is raised."""
+    state = {"pwned": False}
+    monkeypatch.setattr(
+        ram, "detect_device",
+        lambda: {"cpid": "0x8015", "pwned": state["pwned"]})
+    monkeypatch.setattr(ram, "ensure_dfu_driver", lambda log_cb: None)
+
+    seen = {}
+
+    def fake_native(tool, args, **kwargs):
+        seen.update(kwargs)
+        state["pwned"] = True
+        return 0
+
+    monkeypatch.setattr(ram, "native_tool", fake_native)
+    ram.gaster_pwn(lambda m: None, lambda: False)
+    assert seen["extra_env"] == ram.GASTER_ENV
+    assert int(ram.GASTER_ENV["USB_TIMEOUT"]) >= 30000
+
+
+def test_gaster_pwn_survives_driver_switch_failure(monkeypatch):
+    """A permission problem switching drivers must not abort the pwn: on an
+    already-pwned device the pwn is skipped entirely."""
+    monkeypatch.setattr(
+        ram, "detect_device",
+        lambda: {"cpid": "0x8015", "pwned": False})
+    monkeypatch.setattr(ram, "native_tool", lambda *a, **k: 0)
+
+    def boom(log_cb):
+        raise ram.RamdiskError("needs administrator rights")
+
+    monkeypatch.setattr(ram, "ensure_dfu_driver", boom)
+    logs = []
+    ram.gaster_pwn(logs.append, lambda: False)
+    assert any("administrator" in m for m in logs)
+
+
 def test_gaster_helpers_use_native_tool(monkeypatch):
     calls = []
 
@@ -366,13 +553,71 @@ def test_gaster_helpers_use_native_tool(monkeypatch):
 
     monkeypatch.setattr(ram, "native_tool", fake_native_tool)
     monkeypatch.setattr(ram, "wsl_available", lambda: True)
+    monkeypatch.setattr(ram, "detect_device", lambda: None)
+    monkeypatch.setattr(ram, "ensure_dfu_driver", lambda log_cb: None)
 
     ram.gaster_pwn(lambda m: None, lambda: False)
-    ram.gaster_decrypt_kbag(lambda m: None, lambda: False)
 
     assert calls[0][:2] == ("gaster", ("pwn",))
-    assert calls[1][:2] == ("gaster", ("decrypt_kbag", ram.ZERO_KBAG))
-    assert calls[1][2] is True  # `|| true` in sshrd.sh
+
+
+def test_parse_device_info_flags_pwned_checkm8():
+    pwned = ram.parse_device_info(
+        "CPID: 0x8015\nECID: 0x00044dd83ea0002e\nMODE: DFU\nPWND: CHECKM8\n")
+    assert pwned["pwned"] is True
+    # irecovery prints PWND: N/A on an un-pwned device, which must not read
+    # as pwned — otherwise a fresh device skips the pwn it needs.
+    plain = ram.parse_device_info("CPID: 0x8015\nMODE: DFU\nPWND: N/A\n")
+    assert plain["pwned"] is False
+    assert ram.parse_device_info("CPID: 0x8015")["pwned"] is False
+
+
+def test_gaster_pwn_skipped_when_device_already_pwned(monkeypatch):
+    monkeypatch.setattr(
+        ram, "detect_device",
+        lambda: {"cpid": "0x8015", "pwned": True, "mode": "DFU"})
+    monkeypatch.setattr(
+        ram, "native_tool",
+        lambda *a, **k: pytest.fail("gaster must not re-pwn a pwned device"))
+
+    logs = []
+    ram.gaster_pwn(logs.append, lambda: False)
+
+    assert any("already pwned" in m for m in logs)
+
+
+def test_gaster_pwn_accepts_lingering_tool_after_timeout(monkeypatch):
+    """The Windows gaster build pwns, then never exits. Timeout is fine if
+    the device confirms the pwn landed."""
+    state = {"pwned": False}
+
+    def fake_native_tool(tool, args, **kwargs):
+        assert tool == "gaster" and args == ["pwn"]
+        assert kwargs["timeout"] == ram.PWN_TIMEOUT
+        state["pwned"] = True  # exploit landed, but the tool keeps running
+        raise ram.RamdiskTimeout("gaster pwn timed out after 90.0s")
+
+    monkeypatch.setattr(
+        ram, "detect_device",
+        lambda: {"cpid": "0x8015", "pwned": state["pwned"]})
+    monkeypatch.setattr(ram, "native_tool", fake_native_tool)
+
+    logs = []
+    ram.gaster_pwn(logs.append, lambda: False)
+
+    assert any("lingered" in m for m in logs)
+
+
+def test_gaster_pwn_timeout_without_pwn_raises(monkeypatch):
+    """Timing out is only success if the device actually reports pwned."""
+    monkeypatch.setattr(ram, "detect_device", lambda: None)
+    monkeypatch.setattr(
+        ram, "native_tool",
+        lambda *a, **k: (_ for _ in ()).throw(
+            ram.RamdiskTimeout("gaster pwn timed out after 90.0s")))
+
+    with pytest.raises(RamdiskError, match="did not take effect"):
+        ram.gaster_pwn(lambda m: None, lambda: False)
 
 
 def test_op_create_requires_wsl_before_touching_device(monkeypatch):
