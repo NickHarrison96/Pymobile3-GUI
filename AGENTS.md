@@ -6,6 +6,8 @@ Guidance for AI coding assistants working in this repository.
 
 Pymobile3-GUI is a PySide6 (Qt) desktop application for Windows 10/11 that serves as an iOS forensic & developer toolkit. It communicates with iOS devices via `pymobiledevice3` (pinned to 10.x). Extracted from a larger project called RootForgeKit.
 
+**Read `docs/REFERENCES.md` before porting or vendoring anything** — it lists every reference implementation and upstream project this tree derives from, and records the licensing constraint that governs all of it. The active feature roadmap is `docs/TODO.md`.
+
 ## Commands
 
 ```bash
@@ -40,6 +42,7 @@ pymobile3_gui/
 │       ├── elevation.py       # UAC/admin helpers
 │       ├── process_runner.py  # QProcess streaming runner
 │       ├── ramdisk_manager.py # SSH ramdisk tool (SSHRD_Script port)
+│       ├── ich_ramdisk.py     # A12/A13 usbliter8 ramdisk (EXPERIMENTAL)
 │       └── resource_manager.py# Thread pool, subprocess, crash handler
 ├── views/                     # Full-page workspaces (6 views)
 │   ├── device_view.py
@@ -232,7 +235,53 @@ Windows/USB-specific, not logic bugs.
   `nand-enable-reformat=1 -restore` for T2 (`0x8960`/`0x7000`/`0x7001`), so
   NAND bootargs are never applied for A7–A11 — see Known Gaps.
 
+### A12/A13 ramdisk: what is portable and what is not (2026-10-05)
+- **An A12+ `RestoreRamDisk` is APFS, not HFS+.** The checkm8 flow grows and
+  injects it with the vendored Linux `hfsplus`, which cannot touch APFS at all.
+  Every "just use the existing ramdisk code" instinct is wrong here.
+- **There is no APFS writer on Windows or in WSL.** Measured, not assumed:
+  `apt-get install apfsprogs` gives `mkapfs` (no `-srcfolder` import, so the
+  macOS "copy the tree into a new image" trick has no equivalent),
+  `apfsck` and `apfs-snap`; `apfs-fuse` is read-only; `libfsapfs-utils` and
+  `apfs-dkms` (the latter needs kernel headers inside WSL) add no file
+  injection. The only remaining routes are macOS or a commercial APFS driver.
+- **usbliter8 has no Windows host build**, so the A12/A13 pwn and its DFU →
+  Recovery jump cannot be driven from this app at all. Anything that looks like
+  it needs to is a macOS-only step and must fail closed.
+- **`irecovery -q` reports `PWND: usbliter8`, not `CHECKM8`.**
+  `ramdisk_manager.parse_device_info` only matches `CHECKM8`, so
+  `ich_ramdisk.is_ich_pwned()` reads the raw field itself rather than the
+  `dev["pwned"]` boolean — that boolean is checkm8-specific by construction.
+- **A patched kernel has to be LZFSE-compressed again**, and the bundled `img4`
+  has no compression modifier (only `-J` lzfse→lzss and `-R` payload replace).
+  `ich_ramdisk.wrap_kernel()` writes a small pyimg4 helper to disk at run time
+  and runs it under WSL — a file, because under PyInstaller our own modules live
+  in the PYZ where WSL cannot exec them.
+- **`irecovery -c` success is `rc == 0`, not a truthy rc.** Chained fallbacks
+  (`setenvnp` → `setenv`, `setpicture 1` → `setpicture`) were silently always
+  taking the fallback until `_irecv_cmd` started returning a real boolean;
+  `tests/test_ich_ramdisk.py` covers both paths.
+
 ## Active Development
+
+### Roadmap at a glance
+
+**Done & verified:** lockdown control panel, crash reports explorer, backup
+restore-to-device, DVT instruments (kill/launch/sysmon/screenshot — power
+assertion is gone on iOS 26.5), `keep_intermediate`; SSH Ramdisk (checkm8)
+create+boot live on iPhone10,4 / iOS 16.0.3.
+
+**In progress / experimental:**
+- A12/A13 Ramdisk tab (experimental, unverified on hardware — see below).
+- Legacy iOS Kit capability database (`legacy_assets.py`, tests failing while in
+  flight — see `docs/TODO.md` §6.1).
+
+**To do (known gaps):**
+- Mount `/var/mobile` in the checkm8 ramdisk — `mount_ich` candidate.
+- Frozen-binary verification (PyInstaller end-to-end).
+- Legacy iOS Kit parity phases 1–6 (`docs/TODO.md` §6).
+- Verify on hardware: checkm8 `op_reset`/`op_dump_blobs`/`op_clean`, and the
+  whole A12/A13 tab.
 
 ### SSH Ramdisk — build + boot verified on hardware (iPhone10,4 / iOS 16.0.3)
 - Ports SSHRD_Script (checkm8, A7-A11/T2) into the GUI:
@@ -265,6 +314,31 @@ Windows/USB-specific, not logic bugs.
     SSH root shell. `op_reset` (data erase), `op_dump_blobs` and `op_clean` are
     still unverified on checkm8 hardware.
 
+### A12/A13 Ramdisk — EXPERIMENTAL, unverified on hardware
+- Behaviour port of `A12-A13-Ramdisk` (ICHA12A13): an SSH ramdisk for A12/A13
+  after a **usbliter8** pwn, not checkm8. `core/backend/ich_ramdisk.py` —
+  `op_create`, `op_boot`, `op_mount`, `op_console`, `op_clean`.
+- **Never vendored.** The toolkit ships no LICENSE and no license headers, so
+  its `patch/*.py` patchers are executed *in place* from a user-supplied folder
+  (`PMD3_ICH_TOOLKIT`, default `%USERPROFILE%\Desktop\A12-A13-Ramdisk`, or the
+  field on the tab). See `docs/REFERENCES.md` §2.1.
+- **Two macOS-only steps are absent and fail closed** — do not "fix" them by
+  shelling out to something that does not exist:
+  - *APFS ramdisk expand/inject.* No Windows or WSL tool can write into an APFS
+    volume (`apfsprogs` is `mkapfs`/`apfsck`/`apfs-snap` only, no srcfolder
+    import; `apfs-fuse` is read-only). The tab takes a pre-injected ramdisk
+    image as input.
+  - *The usbliter8 handoff.* `usbliter8_boot` is Mach-O and usbliter8 has no
+    Windows host build, so `op_boot` starts at **Recovery** and refuses a device
+    still in pwned DFU.
+- WSL-side deps: the patchers need `capstone` (kernel patchfinder) and `pyimg4`
+  (image4 packaging). `python_deps_ok()` returns the exact `pip3 install` line.
+- UI: "A12/A13 Ramdisk" tab at index 3, behind a HIGHLY EXPERIMENTAL banner.
+  Shares the one `irecovery -q` poll with the checkm8 tab — it runs while either
+  tab is visible and stops when either is busy.
+- `tests/test_ich_ramdisk.py` — 66 offline tests, mostly asserting the
+  *constructed* argv and the boot decision table.
+
 ## Known Gaps (from docs/TODO.md)
 
 Two gaps remain:
@@ -282,9 +356,93 @@ restore-to-device, DVT instruments (kill/launch/sysmon/power assertion — the
 last is unavailable on iOS 26.5, which no longer exposes the arbitration
 service), `keep_intermediate`.
 
+## Planned Work — Legacy iOS Kit parity (docs/TODO.md §6)
+
+A feature-parity port from `C:\Users\nick\Documents\GitHub\Legacy-iOS-Kit`
+(GPL-3.0, Linux/macOS-only, `restore.sh`). The full phase-by-phase plan lives
+in `docs/TODO.md` §6; this section is the live status. Provenance and the
+licensing boundary are in `docs/REFERENCES.md` §1 — read before porting or
+vendoring anything.
+
+### Constraints (bind every item)
+
+- **Re-implement, never copy.** LIK is GPL-3.0 and this project is MIT. Port
+  behaviour from the wiki, over third-party tools whose own licenses apply.
+  `core/backend/ramdisk_manager.py` is the precedent — it reimplements
+  `SSHRD_Script` (also GPL) rather than porting its source.
+- **Everything runs through WSL.** LIK ships no Windows binaries. Reuse the two
+  existing execution paths — `wsl_tool()` for Linux tools, `native_tool()` for
+  the vendored `assets/sshrd/win/*.exe` — rather than adding a third.
+- **Data, not code, goes in `assets/legacy/`.** Apple metadata and bsdiff diffs
+  only. Anything with an author (scripts, binaries, payload tars, firmware
+  bundles) is re-vendored per-tool from its own upstream — see the
+  "Deliberately not copied" table in `assets/legacy/PROVENANCE.md` §4.
+
+### Done — groundwork landed
+
+- **`docs/REFERENCES.md`** — reference list incl. Legacy iOS Kit, plus the
+  GPL-3.0/MIT boundary and the binary inventory.
+- **`docs/TODO.md` §6** — the roadmap: capability DB → DFU plumbing → ramdisk
+  gaps → SHSH → restore/downgrade → app/data → jailbreak, plus an explicit
+  not-porting list (§6.8).
+- **`pymobile3_gui/assets/legacy/`** — 28 Apple `BuildManifest.plist` (the
+  signed-OTA matrix: 6.1.3 / 8.4.1 / 10.3.3) + 81 bsdiff patches (49 main,
+  32 iOS 8). `README.md` / `PROVENANCE.md` / `licenses/NOTICE.txt` record what
+  each file is and why it may be shipped.
+- **`core/backend/legacy_assets.py`** — frozen-aware loader: manifest name →
+  path resolution, `ApChipID`/`ApBoardID`/`DeviceClass`/`RestoreBehavior`,
+  exact IPSW-internal component paths + SHA1 digests, and patch resolution for
+  `iBSS`/`iBEC`/`kernelcache`.
+- **`scripts/legacy_inventory.py`** + **`tests/test_legacy_assets.py`** — 27
+  offline tests; the inventory script regenerates `PROVENANCE.md`, and the
+  tests assert the tree hashes so drift fails CI rather than a restore.
+
+### Next — §6.1 capability database (the unblocks-everything step)
+
+`core/backend/device_db.py` + `tests/test_device_db.py`: model↔ProductType
+maps, processor generation, per-device signed-target/latest version and
+baseband tables, activation-record and powdersn0w/DRA-v6 eligibility. Every
+menu in LIK gates on this and none of it exists here yet. The manifests above
+cover the signed-OTA *matrix*; `device_db` adds the derived capability tables
+around them. Pure data, no device, no WSL — do this before anything in §6.2+.
+
+### Then, in order
+
+- **§6.2 DFU/Recovery plumbing** — kDFU, pwnDFU, send pwned iBSS, exit
+  recovery, just boot + history, per-device DFU helper.
+- **§6.3 SSH ramdisk gaps** — 32-bit and iOS 8 ramdisks (iOS 8 patches already
+  shipped), dump baseband/activation records, erase variants, NVRAM clear,
+  exploit enable/disable, bootstrap/untether/OpenSSH install, TrollStore.
+- **§6.4 SHSH blobs** — OTA save, Cydia blobs, raw-dump conversion, deverser.
+- **§6.5 Restore/downgrade** — signed-OTA, SHSH-blob, latest, powdersn0w,
+  DRA v6, tethered, set-nonce, DFU IPSW, custom IPSW creation, multipatch,
+  baseband/activation stitch, IPSW downloader.
+- **§6.6 App/data management** — IPA install/dump, sideload, mount, backup
+  encryption toggles, pair, activation/hacktivation, info export, uicache.
+- **§6.7 32-bit jailbreak payloads** — g1lbertJB, greenpois0n, evasi0n,
+  pangu, p0sixspwn, daibutsu, Aquila; vendor per-tool, never as a block.
+
+Each phase lands with offline tests asserting *constructed argv* with the
+runner stubbed — the pattern that caught the `wsl_arg` and `paths.app_dir()`
+bugs (see "Asset paths and WSL argv" below).
+
 ## Code Style
 
 - Python 3.10+, type hints where clear
 - Docstrings on all modules and public classes/functions
 - No comments in code unless the "why" is non-obvious (existing code has some explanatory comments for subtle Qt/pymobiledevice3 behavior)
 - Follow existing patterns: new views go in `views/`, new backend services in `core/backend/ new widgets in `ui/`
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues on `NickHarrison96/Pymobile3-GUI` via the `gh` CLI. Never paste device identifiers, user data, blobs or log files into an issue — see the caution in `docs/agents/issue-tracker.md`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default canonical vocabulary, label strings equal to role names (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). All five exist on the repo. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `CONTEXT.md` and `docs/adr/`, both absent and created lazily. **`AGENTS.md` is the domain doc in practice** — read it, plus `docs/REFERENCES.md` and `docs/TODO.md`, before exploring or porting. See `docs/agents/domain.md`.

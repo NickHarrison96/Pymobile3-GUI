@@ -1,0 +1,41 @@
+NOTICE for `pymobile3_gui/assets/legacy/`
+========================================
+
+This directory holds **data only**. No source code from Legacy iOS Kit
+(GPL-3.0) is present here — see `../PROVENANCE.md` §4 for the full list of what
+was deliberately left behind and why.
+
+Contents and their terms
+------------------------
+
+`manifests/*.plist`
+    Apple `BuildManifest.plist`, extracted verbatim from publicly distributed
+    signed IPSWs. Authored by Apple. Redistributed as unmodified device
+    metadata so a restore can be validated without re-downloading a
+    multi-gigabyte firmware package. Apple firmware and its metadata remain
+    Apple's; nothing here grants any Apple license or trademark right.
+
+`patches/*.patch`, `patches/ios8/*.patch`
+    bsdiff binary diffs (`BSDIFF40` / `BSDIFF407` container, bzip2-compressed
+    blocks), applied with `bspatch`. The format is published by Colin Percival
+    and carries no per-patch license of its own. The diffs patch Apple firmware
+    images; the patched result is derived from Apple firmware and is used only
+    on the user's own device, offline, at the user's own election.
+
+    Provenance of the diffs themselves is recorded in `../PROVENANCE.md` §2–3.
+    They originate with the SSHRD_Script / Legacy iOS Kit line of work and are
+    carried over unrevised.
+
+`PROVENANCE.md`, `README.md`, `NOTICE.txt`
+    Written for this project. MIT, same terms as the rest of the repository.
+
+Third-party license texts
+-------------------------
+
+None needed yet. When §6.7 (jailbreak payloads) or §6.5 (firmware bundles)
+lands and brings in binaries or patches with their own terms, add the
+corresponding text here as `<tool>_LICENSE`, matching the naming already used
+in `pymobile3_gui/assets/sshrd/licenses/`.
+
+If you add a file here whose license you cannot state, do not add it. That rule
+is the only reason this tree is safe to ship.
