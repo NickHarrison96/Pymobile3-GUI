@@ -168,10 +168,8 @@ Implementation notes:
       Filesystem`, `Flashing Kernel`, `Finalizing`).
 - [x] **Mixed line endings.** Done — `.gitattributes` with `* text=auto` plus
       per-extension `eol=lf` (committed separately, as planned).
-- [ ] **No `LICENSE` file.** `README.md` says "MIT — see LICENSE file" but the
-      file was never committed. It matters more now that `docs/REFERENCES.md`
-      documents a GPL-3.0 boundary we intend to keep — the MIT grant has to
-      actually exist. Add the MIT text.
+- [x] **No `LICENSE` file.** Done — MIT text added at `LICENSE` (B0), so the
+      grant `README.md` and `pyproject.toml` both promise actually exists.
 
 ---
 
