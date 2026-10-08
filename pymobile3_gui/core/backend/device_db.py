@@ -33,6 +33,9 @@ __all__ = [
     "checkm8_ipad",
     "signed_target",
     "latest_version",
+    "baseband",
+    "latest_baseband",
+    "baseband_flag",
 ]
 
 
@@ -397,3 +400,69 @@ def latest_version(
     if fallback:
         return fallback
     return fetcher(product_type) if fetcher else None
+
+
+_BASEBAND_USE_RULES: Tuple[Tuple[Tuple[str, ...], Tuple[str, str]], ...] = (
+    (("iPhone4,1",), ("Trek-6.7.00.Release.bbfw", "22a35425a3cdf8fa1458b5116cfb199448eecf49")),
+    (
+        ("iPad2,[67]",),
+        ("Mav5-11.80.00.Release.bbfw", "aa52cf75b82fc686f94772e216008345b6a2a750"),
+    ),
+    (
+        ("iPhone5,[12]", "iPad3,[56]"),
+        ("Mav5-11.80.00.Release.bbfw", "8951cf09f16029c5c0533e951eb4c06609d0ba7f"),
+    ),
+    (
+        ("iPad4,[235]", "iPhone5,[34]", "iPhone6,[12]"),
+        ("Mav7Mav8-7.60.00.Release.bbfw", "f397724367f6bed459cf8f3d523553c13e8ae12c"),
+    ),
+)
+"""Ordered (ProductType globs -> (bbfw name, sha1)) `device_use_bb`."""
+
+_BASEBAND_LATEST_RULES: Tuple[Tuple[Tuple[str, ...], Tuple[str, str]], ...] = (
+    (
+        ("iPad4,[235689]", "iPhone6,[12]"),
+        ("Mav7Mav8-10.80.02.Release.bbfw", "f5db17f72a78d807a791138dd5ca87d2f5e859f0"),
+    ),
+)
+"""Ordered (ProductType globs -> (bbfw name, sha1)) `device_latest_bb`."""
+
+_BASEBAND_FLAG_RULES: Tuple[Tuple[Tuple[str, ...], int], ...] = (
+    (("iPad1,1", "iPhone[123],*"), 1),
+    (("iPad[23],[23]",), 2),
+)
+"""Ordered (ProductType globs -> flag) for `device_use_bb2`."""
+
+
+def latest_baseband(product_type) -> Optional[Tuple[str, str]]:
+    """Return the latest-known (bbfw name, sha1) for a ProductType, or None."""
+    if product_type is None:
+        return None
+    return _match_rules(str(product_type).strip(), _BASEBAND_LATEST_RULES)
+
+
+def baseband(product_type) -> Optional[Tuple[str, str]]:
+    """Return the baseband (bbfw name, sha1) to use for a ProductType.
+
+    Mirrors Legacy-iOS-Kit: the `device_use_bb` table first; when a device has
+    no use entry but has a latest entry, the latest is copied over. Devices
+    with no baseband (WiFi iPads, newer chipsets) return None.
+    """
+    if product_type is None:
+        return None
+    product_type = str(product_type).strip()
+    use = _match_rules(product_type, _BASEBAND_USE_RULES)
+    if use:
+        return use
+    return latest_baseband(product_type)
+
+
+def baseband_flag(product_type) -> int:
+    """Return the `device_use_bb2` flag (0/1/2) for a ProductType."""
+    if product_type is None:
+        return 0
+    product_type = str(product_type).strip()
+    for patterns, flag in _BASEBAND_FLAG_RULES:
+        if any(fnmatch.fnmatchcase(product_type, pat) for pat in patterns):
+            return flag
+    return 0

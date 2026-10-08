@@ -254,3 +254,49 @@ def test_latest_version_fetcher_not_called_when_table_hits():
 
     assert db.latest_version("iPhone10,4", fetcher=fetcher) == ("16.7.16", "20H392")
     assert db.latest_version(None, fetcher=fetcher) is None
+
+
+@pytest.mark.parametrize(
+    "product_type,expected_name,expected_sha1",
+    [
+        ("iPhone4,1", "Trek-6.7.00.Release.bbfw", "22a35425a3cdf8fa1458b5116cfb199448eecf49"),
+        ("iPad2,7", "Mav5-11.80.00.Release.bbfw", "aa52cf75b82fc686f94772e216008345b6a2a750"),
+        ("iPhone5,2", "Mav5-11.80.00.Release.bbfw", "8951cf09f16029c5c0533e951eb4c06609d0ba7f"),
+        ("iPhone6,1", "Mav7Mav8-7.60.00.Release.bbfw", "f397724367f6bed459cf8f3d523553c13e8ae12c"),
+        ("iPad4,6", "Mav7Mav8-10.80.02.Release.bbfw", "f5db17f72a78d807a791138dd5ca87d2f5e859f0"),
+    ],
+)
+def test_baseband(product_type, expected_name, expected_sha1):
+    assert db.baseband(product_type) == (expected_name, expected_sha1)
+
+
+@pytest.mark.parametrize("product_type", ["iPad4,1", "iPad4,4", "iPad4,7", "iPhone8,1", None])
+def test_baseband_absent(product_type):
+    assert db.baseband(product_type) is None
+    assert db.latest_baseband(product_type) is None
+
+
+def test_baseband_digests_are_sha1():
+    for product_type in ("iPhone4,1", "iPad2,7", "iPhone5,2", "iPhone6,1", "iPad4,6"):
+        _name, sha1 = db.baseband(product_type)
+        assert len(sha1) == 40
+        int(sha1, 16)
+
+
+@pytest.mark.parametrize(
+    "product_type,expected",
+    [
+        ("iPad1,1", 1),
+        ("iPhone1,1", 1),
+        ("iPhone2,1", 1),
+        ("iPhone3,1", 1),
+        ("iPad2,3", 2),
+        ("iPad3,2", 2),
+        ("iPad2,1", 0),
+        ("iPhone6,1", 0),
+        ("iPad4,1", 0),
+        (None, 0),
+    ],
+)
+def test_baseband_flag(product_type, expected):
+    assert db.baseband_flag(product_type) == expected
