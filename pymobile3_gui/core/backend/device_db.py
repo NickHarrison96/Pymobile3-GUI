@@ -13,18 +13,23 @@ reimplemented as data, not copied.
 Data only; performs no device I/O.
 """
 
+import re
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 __all__ = [
     "DeviceBoard",
     "REGISTRY",
     "AMBIGUOUS_PRODUCT_TYPES",
+    "PROCESSOR_NAMES",
     "normalize_board",
     "product_type_for_board",
     "boards_for_product_type",
     "board_for_product_type",
     "is_ambiguous",
     "resolve_identity",
+    "processor_generation",
+    "processor_name",
+    "checkm8_ipad",
 ]
 
 
@@ -226,3 +231,101 @@ def resolve_identity(
         board = board_for_product_type(product_type) or ""
 
     return product_type, board
+
+
+PROCESSOR_NAMES: Dict[int, str] = {
+    1: "S5L8900",
+    4: "A4",
+    5: "A5",
+    6: "A6",
+    7: "A7",
+    8: "A8",
+    9: "A9",
+    10: "A10/A11",
+    11: "Newer",
+}
+"""Generation -> the SoC family Legacy-iOS-Kit's `device_proc` stands for."""
+
+_PRODUCT_TYPE_RE = re.compile(r"^(iPhone|iPad|iPod)(\d+),(\d+)$")
+
+
+def _split_product_type(product_type) -> Optional[Tuple[str, int, int]]:
+    """Split "iPhone8,1" into ("iPhone", 8, 1); None when malformed."""
+    if not product_type:
+        return None
+    match = _PRODUCT_TYPE_RE.match(str(product_type).strip())
+    if not match:
+        return None
+    return match.group(1), int(match.group(2)), int(match.group(3))
+
+
+def processor_generation(product_type) -> int:
+    """Return Legacy-iOS-Kit's `device_proc` generation for a ProductType.
+
+    Mirrors the ordered `case` in restore.sh: S5L8900=1, A4=4, A5=5, A6=6,
+    A7=7, A8=8, A9=9, A10/A11=10, and anything newer=11. Returns 0 when the
+    ProductType is unknown or malformed (LIK raises an error in that case).
+    """
+    parts = _split_product_type(product_type)
+    if parts is None:
+        text = "" if product_type is None else str(product_type).strip()
+        if text.startswith(("AppleTV", "Watch")):
+            return 11
+        return 0
+    family, major, minor = parts
+
+    if family == "iPad" and major == 1:
+        return 4
+    if major == 1:
+        return 1
+    if family == "iPhone" and major in (2, 3):
+        return 4
+    if family == "iPod" and major in (2, 3, 4):
+        return 4
+    if family == "iPad" and major == 2:
+        return 5
+    if family == "iPad" and major == 3 and minor in (1, 2, 3):
+        return 5
+    if family == "iPhone" and major == 4:
+        return 5
+    if family == "iPod" and major == 5:
+        return 5
+    if family == "iPad" and major == 3:
+        return 6
+    if family == "iPhone" and major == 5:
+        return 6
+    if family == "iPad" and major == 4:
+        return 7
+    if family == "iPhone" and major == 6:
+        return 7
+    if family == "iPad" and major == 5:
+        return 8
+    if family == "iPhone" and major == 7:
+        return 8
+    if family == "iPod" and major == 7:
+        return 8
+    if family == "iPad" and major == 6:
+        return 9
+    if family == "iPhone" and major == 8:
+        return 9
+    if family == "iPad" and major == 7:
+        return 10
+    if family == "iPhone" and major in (9, 10):
+        return 10
+    if family == "iPod" and major == 9:
+        return 10
+    return 11
+
+
+def processor_name(product_type) -> str:
+    """Human label for a ProductType's processor generation, e.g. "A9"."""
+    return PROCESSOR_NAMES.get(processor_generation(product_type), "")
+
+
+def checkm8_ipad(product_type) -> bool:
+    """True for the checkm8-capable iPads (device_checkm8ipad: iPad6/7)."""
+    parts = _split_product_type(product_type)
+    if parts is None:
+        return False
+    family, major, _minor = parts
+    return family == "iPad" and major in (6, 7)

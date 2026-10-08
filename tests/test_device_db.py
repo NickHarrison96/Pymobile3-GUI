@@ -113,3 +113,80 @@ def test_resolve_uses_reported_type_when_board_unknown():
 def test_resolve_empty_inputs():
     assert db.resolve_identity() == ("", "")
     assert db.resolve_identity(None, "") == ("", "")
+
+
+def test_every_registry_row_has_a_processor_generation():
+    for row in db.REGISTRY:
+        assert 1 <= db.processor_generation(row.product_type) <= 11
+
+
+@pytest.mark.parametrize(
+    "product_type,generation",
+    [
+        ("iPhone1,1", 1),
+        ("iPod1,1", 1),
+        ("iPad1,1", 4),
+        ("iPhone2,1", 4),
+        ("iPhone3,1", 4),
+        ("iPod4,1", 4),
+        ("iPad2,1", 5),
+        ("iPad3,1", 5),
+        ("iPad3,3", 5),
+        ("iPhone4,1", 5),
+        ("iPod5,1", 5),
+        ("iPad3,4", 6),
+        ("iPhone5,3", 6),
+        ("iPad4,1", 7),
+        ("iPhone6,2", 7),
+        ("iPad5,4", 8),
+        ("iPhone7,1", 8),
+        ("iPod7,1", 8),
+        ("iPad6,11", 9),
+        ("iPhone8,4", 9),
+        ("iPad7,12", 10),
+        ("iPhone9,3", 10),
+        ("iPhone10,6", 10),
+        ("iPod9,1", 10),
+    ],
+)
+def test_processor_generation_table(product_type, generation):
+    assert db.processor_generation(product_type) == generation
+
+
+def test_processor_generation_unknown_and_newer():
+    assert db.processor_generation("iPhone99,1") == 11
+    assert db.processor_generation("iPad99,1") == 11
+    assert db.processor_generation("AppleTV5,3") == 11
+    assert db.processor_generation("nonsense") == 0
+    assert db.processor_generation(None) == 0
+    assert db.processor_generation("") == 0
+
+
+def test_processor_name():
+    assert db.processor_name("iPhone10,6") == "A10/A11"
+    assert db.processor_name("iPad2,1") == "A5"
+    assert db.processor_name("nonsense") == ""
+
+
+@pytest.mark.parametrize(
+    "product_type,expected",
+    [
+        ("iPad6,11", True),
+        ("iPad6,12", True),
+        ("iPad7,1", True),
+        ("iPad7,12", True),
+        ("iPad5,3", False),
+        ("iPhone9,1", False),
+        ("nonsense", False),
+        (None, False),
+    ],
+)
+def test_checkm8_ipad(product_type, expected):
+    assert db.checkm8_ipad(product_type) is expected
+
+
+def test_registry_keys_are_split_correctly():
+    for row in db.REGISTRY:
+        parts = db._split_product_type(row.product_type)
+        assert parts is not None
+        assert f"{parts[0]}{parts[1]},{parts[2]}" == row.product_type
