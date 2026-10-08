@@ -287,10 +287,12 @@ Every block below is executed in the same loop: **implement → offline tests �
 
 ### 6.0.2 Block index (execution order)
 
+Prefix a block's number with `[x]` once it is committed.
+
 | # | Block | Phase | HW |
 |---|---|---|---|
-| B0 | Add MIT `LICENSE` | §3 | no |
-| B1a | HardwareModel ↔ ProductType map | 6.1 | no |
+| [x] B0 | Add MIT `LICENSE` | §3 | no |
+| [x] B1a | HardwareModel ↔ ProductType map | 6.1 | no |
 | B1b | Processor generation (`device_proc` 1–11) | 6.1 | no |
 | B1c | Signed-target + latest version matrix | 6.1 | no |
 | B1d | Baseband name + SHA1 | 6.1 | no |

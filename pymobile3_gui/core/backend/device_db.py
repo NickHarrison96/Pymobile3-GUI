@@ -1,0 +1,228 @@
+"""
+Pymobile3-GUI — Device Capability Database
+
+Pure-data table plus lookup helpers describing what each iOS device is and
+what it can do. This module is the foundation the Legacy iOS Kit parity work
+gates on (see docs/TODO.md section 6.1): every menu there keys off ProductType,
+board id, processor generation and iOS version.
+
+Block B1a covers the HardwareModel <-> ProductType map, ported from the
+behaviour of Legacy-iOS-Kit's `device_get_info` (restore.sh). It is
+reimplemented as data, not copied.
+
+Data only; performs no device I/O.
+"""
+
+from typing import Dict, List, NamedTuple, Optional, Tuple
+
+__all__ = [
+    "DeviceBoard",
+    "REGISTRY",
+    "AMBIGUOUS_PRODUCT_TYPES",
+    "normalize_board",
+    "product_type_for_board",
+    "boards_for_product_type",
+    "board_for_product_type",
+    "is_ambiguous",
+    "resolve_identity",
+]
+
+
+class DeviceBoard(NamedTuple):
+    """One (board id, ProductType) row of the hardware map."""
+
+    board: str
+    """Hardware model, lowered and stripped of its trailing "ap", e.g. "n71"."""
+
+    product_type: str
+    """Apple product type, e.g. "iPhone8,1"."""
+
+    device_class: str
+    """Family grouping: "iPhone", "iPad" or "iPod"."""
+
+
+REGISTRY: Tuple[DeviceBoard, ...] = (
+    DeviceBoard("k48", "iPad1,1", "iPad"),
+    DeviceBoard("k93", "iPad2,1", "iPad"),
+    DeviceBoard("k94", "iPad2,2", "iPad"),
+    DeviceBoard("k95", "iPad2,3", "iPad"),
+    DeviceBoard("k93a", "iPad2,4", "iPad"),
+    DeviceBoard("p105", "iPad2,5", "iPad"),
+    DeviceBoard("p106", "iPad2,6", "iPad"),
+    DeviceBoard("p107", "iPad2,7", "iPad"),
+    DeviceBoard("j1", "iPad3,1", "iPad"),
+    DeviceBoard("j2", "iPad3,2", "iPad"),
+    DeviceBoard("j2a", "iPad3,3", "iPad"),
+    DeviceBoard("p101", "iPad3,4", "iPad"),
+    DeviceBoard("p102", "iPad3,5", "iPad"),
+    DeviceBoard("p103", "iPad3,6", "iPad"),
+    DeviceBoard("j71", "iPad4,1", "iPad"),
+    DeviceBoard("j72", "iPad4,2", "iPad"),
+    DeviceBoard("j73", "iPad4,3", "iPad"),
+    DeviceBoard("j85", "iPad4,4", "iPad"),
+    DeviceBoard("j86", "iPad4,5", "iPad"),
+    DeviceBoard("j87", "iPad4,6", "iPad"),
+    DeviceBoard("j85m", "iPad4,7", "iPad"),
+    DeviceBoard("j86m", "iPad4,8", "iPad"),
+    DeviceBoard("j87m", "iPad4,9", "iPad"),
+    DeviceBoard("j96", "iPad5,1", "iPad"),
+    DeviceBoard("j97", "iPad5,2", "iPad"),
+    DeviceBoard("j81", "iPad5,3", "iPad"),
+    DeviceBoard("j82", "iPad5,4", "iPad"),
+    DeviceBoard("j127", "iPad6,3", "iPad"),
+    DeviceBoard("j128", "iPad6,4", "iPad"),
+    DeviceBoard("j98a", "iPad6,7", "iPad"),
+    DeviceBoard("j99a", "iPad6,8", "iPad"),
+    DeviceBoard("j71s", "iPad6,11", "iPad"),
+    DeviceBoard("j71t", "iPad6,11", "iPad"),
+    DeviceBoard("j72s", "iPad6,12", "iPad"),
+    DeviceBoard("j72t", "iPad6,12", "iPad"),
+    DeviceBoard("j120", "iPad7,1", "iPad"),
+    DeviceBoard("j121", "iPad7,2", "iPad"),
+    DeviceBoard("j207", "iPad7,3", "iPad"),
+    DeviceBoard("j208", "iPad7,4", "iPad"),
+    DeviceBoard("j71b", "iPad7,5", "iPad"),
+    DeviceBoard("j72b", "iPad7,6", "iPad"),
+    DeviceBoard("j171", "iPad7,11", "iPad"),
+    DeviceBoard("j172", "iPad7,12", "iPad"),
+    DeviceBoard("m68", "iPhone1,1", "iPhone"),
+    DeviceBoard("n82", "iPhone1,2", "iPhone"),
+    DeviceBoard("n88", "iPhone2,1", "iPhone"),
+    DeviceBoard("n90", "iPhone3,1", "iPhone"),
+    DeviceBoard("n90b", "iPhone3,2", "iPhone"),
+    DeviceBoard("n92", "iPhone3,3", "iPhone"),
+    DeviceBoard("n94", "iPhone4,1", "iPhone"),
+    DeviceBoard("n41", "iPhone5,1", "iPhone"),
+    DeviceBoard("n42", "iPhone5,2", "iPhone"),
+    DeviceBoard("n48", "iPhone5,3", "iPhone"),
+    DeviceBoard("n49", "iPhone5,4", "iPhone"),
+    DeviceBoard("n51", "iPhone6,1", "iPhone"),
+    DeviceBoard("n53", "iPhone6,2", "iPhone"),
+    DeviceBoard("n56", "iPhone7,1", "iPhone"),
+    DeviceBoard("n61", "iPhone7,2", "iPhone"),
+    DeviceBoard("n71", "iPhone8,1", "iPhone"),
+    DeviceBoard("n71m", "iPhone8,1", "iPhone"),
+    DeviceBoard("n66", "iPhone8,2", "iPhone"),
+    DeviceBoard("n66m", "iPhone8,2", "iPhone"),
+    DeviceBoard("n69", "iPhone8,4", "iPhone"),
+    DeviceBoard("n69u", "iPhone8,4", "iPhone"),
+    DeviceBoard("d10", "iPhone9,1", "iPhone"),
+    DeviceBoard("d11", "iPhone9,2", "iPhone"),
+    DeviceBoard("d101", "iPhone9,3", "iPhone"),
+    DeviceBoard("d111", "iPhone9,4", "iPhone"),
+    DeviceBoard("d20", "iPhone10,1", "iPhone"),
+    DeviceBoard("d21", "iPhone10,2", "iPhone"),
+    DeviceBoard("d22", "iPhone10,3", "iPhone"),
+    DeviceBoard("d201", "iPhone10,4", "iPhone"),
+    DeviceBoard("d211", "iPhone10,5", "iPhone"),
+    DeviceBoard("d221", "iPhone10,6", "iPhone"),
+    DeviceBoard("n45", "iPod1,1", "iPod"),
+    DeviceBoard("n72", "iPod2,1", "iPod"),
+    DeviceBoard("n18", "iPod3,1", "iPod"),
+    DeviceBoard("n81", "iPod4,1", "iPod"),
+    DeviceBoard("n78", "iPod5,1", "iPod"),
+    DeviceBoard("n102", "iPod7,1", "iPod"),
+    DeviceBoard("n112", "iPod9,1", "iPod"),
+)
+
+_BOARD_TO_TYPE: Dict[str, str] = {row.board: row.product_type for row in REGISTRY}
+
+_TYPE_TO_BOARDS: Dict[str, List[str]] = {}
+for _row in REGISTRY:
+    _TYPE_TO_BOARDS.setdefault(_row.product_type, []).append(_row.board)
+del _row
+
+AMBIGUOUS_PRODUCT_TYPES = frozenset(
+    {
+        "iPad6,11",
+        "iPad6,12",
+        "iPhone8,1",
+        "iPhone8,2",
+        "iPhone8,4",
+    }
+)
+"""ProductTypes that can report more than one board id.
+
+Legacy-iOS-Kit deliberately leaves the board untouched for these in its
+ProductType -> board fallback, so there is no single canonical board. Querying
+`board_for_product_type` on one of these returns None.
+"""
+
+
+def normalize_board(raw) -> str:
+    """Normalize a HardwareModel to its lowered, "ap"-stripped board id.
+
+    Accepts the raw lockdown value ("N71AP"), an already-lowered one ("n71ap"),
+    a bare board ("n71") or None; returns "" when nothing usable is left.
+    """
+    if raw is None:
+        return ""
+    text = str(raw).strip().lower()
+    if text.endswith("ap"):
+        text = text[:-2]
+    return text
+
+
+def product_type_for_board(board) -> Optional[str]:
+    """Return the ProductType for a board id, or None when unknown."""
+    return _BOARD_TO_TYPE.get(normalize_board(board))
+
+
+def boards_for_product_type(product_type) -> Tuple[str, ...]:
+    """Return every board id that reports this ProductType, in table order."""
+    if not product_type:
+        return ()
+    return tuple(_TYPE_TO_BOARDS.get(str(product_type).strip(), ()))
+
+
+def is_ambiguous(product_type) -> bool:
+    """True when a ProductType can report more than one board id."""
+    return str(product_type).strip() in AMBIGUOUS_PRODUCT_TYPES
+
+
+def board_for_product_type(product_type) -> Optional[str]:
+    """Return the canonical board id for a ProductType, or None.
+
+    None means either the ProductType is unknown or it is ambiguous (more than
+    one board reports it), matching Legacy-iOS-Kit, which never forces a board
+    for the ambiguous set.
+    """
+    key = str(product_type).strip() if product_type else ""
+    if not key or key in AMBIGUOUS_PRODUCT_TYPES:
+        return None
+    boards = _TYPE_TO_BOARDS.get(key)
+    return boards[0] if boards else None
+
+
+def resolve_identity(
+    hardware_model=None, reported_product_type=None
+) -> Tuple[str, str]:
+    """Resolve (ProductType, board) the way Legacy-iOS-Kit's device_get_info does.
+
+    Applies the two documented quirks: an "N81AP" HardwareModel (iPod touch 4
+    on iOS 7, which reports as iPhone3,1/3,3) is forced to iPod4,1; and a
+    reported iPad2,1 forces the board to "k93". A board present in the table
+    takes precedence over the reported ProductType, matching the board -> type
+    "fallback/failsafe" case. Returns ("", "") when nothing resolves.
+    """
+    raw_model = "" if hardware_model is None else str(hardware_model).strip()
+    board = normalize_board(raw_model)
+    product_type = (
+        "" if reported_product_type is None else str(reported_product_type).strip()
+    )
+
+    if raw_model.upper() == "N81AP":
+        product_type = "iPod4,1"
+    if product_type == "iPad2,1":
+        board = "k93"
+
+    mapped = _BOARD_TO_TYPE.get(board)
+    if mapped:
+        product_type = mapped
+    elif not product_type:
+        product_type = _BOARD_TO_TYPE.get(board, "")
+
+    if not board and product_type:
+        board = board_for_product_type(product_type) or ""
+
+    return product_type, board
