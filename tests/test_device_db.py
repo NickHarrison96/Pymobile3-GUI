@@ -190,3 +190,67 @@ def test_registry_keys_are_split_correctly():
         parts = db._split_product_type(row.product_type)
         assert parts is not None
         assert f"{parts[0]}{parts[1]},{parts[2]}" == row.product_type
+
+
+@pytest.mark.parametrize(
+    "product_type,expected",
+    [
+        ("iPhone1,1", ("3.1.3", "7E18")),
+        ("iPod2,1", ("4.2.1", "8C148")),
+        ("iPad1,1", ("5.1.1", "9B206")),
+        ("iPhone2,1", ("6.1.6", "10B500")),
+        ("iPhone3,3", ("7.1.2", "11D257")),
+        ("iPad2,4", ("9.3.5", "13G36")),
+        ("iPhone4,1", ("9.3.6", "13G37")),
+        ("iPhone5,4", ("10.3.4", "14G61")),
+        ("iPhone6,2", ("10.3.3", "14G60")),
+        ("iPhone8,1", None),
+        ("iPhone12,1", None),
+        (None, None),
+    ],
+)
+def test_signed_target(product_type, expected):
+    assert db.signed_target(product_type) == expected
+
+
+@pytest.mark.parametrize(
+    "product_type,expected",
+    [
+        ("iPad4,1", ("12.5.8", "16H88")),
+        ("iPhone7,1", ("12.5.8", "16H88")),
+        ("iPod7,1", ("12.5.8", "16H88")),
+        ("iPhone8,1", ("15.8.8", "19H422")),
+        ("iPod9,1", ("15.8.8", "19H422")),
+        ("iPhone10,4", ("16.7.16", "20H392")),
+        ("iPad6,11", ("16.7.16", "20H392")),
+        ("iPad7,4", ("17.7.11", "21H461")),
+        ("iPad7,12", ("18.7.9", "22H355")),
+        ("iPhone11,8", ("18.7.9", "22H355")),
+    ],
+)
+def test_latest_version_table(product_type, expected):
+    assert db.latest_version(product_type) == expected
+
+
+def test_latest_version_falls_back_to_signed_target():
+    assert db.latest_version("iPhone1,1") == ("3.1.3", "7E18")
+    assert db.latest_version("iPhone4,1") == ("9.3.6", "13G37")
+
+
+def test_latest_version_uses_fetcher_when_tables_miss():
+    calls = []
+
+    def fetcher(product_type):
+        calls.append(product_type)
+        return ("26.1", "23B77")
+
+    assert db.latest_version("iPhone20,1", fetcher=fetcher) == ("26.1", "23B77")
+    assert calls == ["iPhone20,1"]
+
+
+def test_latest_version_fetcher_not_called_when_table_hits():
+    def fetcher(product_type):
+        raise AssertionError("fetcher must not be called")
+
+    assert db.latest_version("iPhone10,4", fetcher=fetcher) == ("16.7.16", "20H392")
+    assert db.latest_version(None, fetcher=fetcher) is None

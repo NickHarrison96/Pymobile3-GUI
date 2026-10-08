@@ -13,8 +13,9 @@ reimplemented as data, not copied.
 Data only; performs no device I/O.
 """
 
+import fnmatch
 import re
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 __all__ = [
     "DeviceBoard",
@@ -30,6 +31,8 @@ __all__ = [
     "processor_generation",
     "processor_name",
     "checkm8_ipad",
+    "signed_target",
+    "latest_version",
 ]
 
 
@@ -329,3 +332,68 @@ def checkm8_ipad(product_type) -> bool:
         return False
     family, major, _minor = parts
     return family == "iPad" and major in (6, 7)
+
+
+_SIGNED_TARGET_RULES: Tuple[Tuple[Tuple[str, ...], Tuple[str, str]], ...] = (
+    (("iPhone1,1", "iPod1,1"), ("3.1.3", "7E18")),
+    (("iPhone1,2", "iPod2,1"), ("4.2.1", "8C148")),
+    (("iPad1,1", "iPod3,1"), ("5.1.1", "9B206")),
+    (("iPhone2,1", "iPod4,1"), ("6.1.6", "10B500")),
+    (("iPhone3,[123]",), ("7.1.2", "11D257")),
+    (("iPad2,[1245]", "iPad3,1", "iPod5,1"), ("9.3.5", "13G36")),
+    (("iPad2,[367]", "iPad3,[23]", "iPhone4,1"), ("9.3.6", "13G37")),
+    (("iPad3,[456]", "iPhone5,[1234]"), ("10.3.4", "14G61")),
+    (("iPad4,[12345]", "iPhone6,[12]"), ("10.3.3", "14G60")),
+)
+"""Ordered (ProductType globs -> (version, build)) OTA-downgrade matrix."""
+
+_LATEST_RULES: Tuple[Tuple[Tuple[str, ...], Tuple[str, str]], ...] = (
+    (("iPad4,*", "iPhone[67],*", "iPod7,1"), ("12.5.8", "16H88")),
+    (("iPad5,*", "iPhone[89],*", "iPod9,1"), ("15.8.8", "19H422")),
+    (("iPad6,*", "iPhone10,*"), ("16.7.16", "20H392")),
+    (("iPad7,[123456]",), ("17.7.11", "21H461")),
+    (("iPad7,1[12]", "iPhone11,*"), ("18.7.9", "22H355")),
+)
+"""Ordered (ProductType globs -> (version, build)) latest-known versions."""
+
+
+def _match_rules(
+    product_type: str, rules: Tuple[Tuple[Tuple[str, ...], Tuple[str, str]], ...]
+) -> Optional[Tuple[str, str]]:
+    for patterns, version in rules:
+        if any(fnmatch.fnmatchcase(product_type, pat) for pat in patterns):
+            return version
+    return None
+
+
+def signed_target(product_type) -> Optional[Tuple[str, str]]:
+    """Return the signed-target (version, build) for a ProductType, or None.
+
+    This is the OTA-downgrade matrix: the last version Apple signed for a
+    device (3.1.3/7E18 ... 10.3.3/14G60). Newer devices are absent by design.
+    """
+    if product_type is None:
+        return None
+    return _match_rules(str(product_type).strip(), _SIGNED_TARGET_RULES)
+
+
+def latest_version(
+    product_type, fetcher: Optional[Callable[[str], Optional[Tuple[str, str]]]] = None
+) -> Optional[Tuple[str, str]]:
+    """Return the latest-known (version, build) for a ProductType.
+
+    Resolution order mirrors Legacy-iOS-Kit: the hardcoded latest table first,
+    then the signed-target matrix, then an optional `fetcher` (the ipsw.me
+    fallback) when both miss. The fetcher is injected so tests stay offline;
+    without one, an unknown device returns None.
+    """
+    if product_type is None:
+        return None
+    product_type = str(product_type).strip()
+    latest = _match_rules(product_type, _LATEST_RULES)
+    if latest:
+        return latest
+    fallback = signed_target(product_type)
+    if fallback:
+        return fallback
+    return fetcher(product_type) if fetcher else None
