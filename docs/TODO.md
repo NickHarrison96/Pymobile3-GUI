@@ -296,7 +296,7 @@ Prefix a block's number with `[x]` once it is committed.
 | [x] B1b | Processor generation (`device_proc` 1–11) | 6.1 | no |
 | [x] B1c | Signed-target + latest version matrix | 6.1 | no |
 | [x] B1d | Baseband name + SHA1 | 6.1 | no |
-| B1e | Activation / powdersn0w / DRA-v6 eligibility | 6.1 | no |
+| [x] B1e | Activation / powdersn0w / DRA-v6 eligibility | 6.1 | no |
 | B1f | `device_get_info` ECID/UDID/build/mode parsers | 6.1 | no |
 | B2 | Version-update check | 6.6 | no |
 | B3 | App list user/system/all | 6.6 | no |

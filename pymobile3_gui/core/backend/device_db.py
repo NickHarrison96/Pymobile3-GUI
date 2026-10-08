@@ -36,6 +36,12 @@ __all__ = [
     "baseband",
     "latest_baseband",
     "baseband_flag",
+    "is_9900_candidate",
+    "has_activation_issue",
+    "activation_record_mode",
+    "can_powdersn0w",
+    "powdersn0w_versions",
+    "can_dra_v6",
 ]
 
 
@@ -466,3 +472,80 @@ def baseband_flag(product_type) -> int:
         if any(fnmatch.fnmatchcase(product_type, pat) for pat in patterns):
             return flag
     return 0
+
+
+def _matches(product_type, patterns: Tuple[str, ...]) -> bool:
+    """True when `product_type` matches any ProductType glob in `patterns`."""
+    if not product_type:
+        return False
+    return any(fnmatch.fnmatchcase(str(product_type), pat) for pat in patterns)
+
+
+_9900_CANDIDATE = ("iPhone4,1", "iPhone5,2", "iPad2,7", "iPad3,[26]")
+_ACTIVATION_ISSUE = ("iPhone[123],[12]", "iPad1,1", "iPad2,2", "iPad3,3")
+_CAN_POWDER = ("iPhone[345],*", "iPad1,1", "iPad[23],*", "iPod[35],1")
+_CAN_DRA_V6 = ("iPad2,1", "iPhone4,1", "iPod4,1")
+_POWDERSN0W_71 = ("iPad2,4", "iPad3,[123]", "iPhone4,1")
+
+
+def is_9900_candidate(product_type) -> bool:
+    """True for the devices LIK tracks as MDM6610/9615 baseband (`9900candidate`)."""
+    return _matches(product_type, _9900_CANDIDATE)
+
+
+def has_activation_issue(product_type) -> bool:
+    """True for the devices LIK flags with a known activation issue."""
+    return _matches(product_type, _ACTIVATION_ISSUE)
+
+
+def can_powdersn0w(product_type) -> bool:
+    """True when the device is eligible for a powdersn0w (downgrade) restore."""
+    return _matches(product_type, _CAN_POWDER)
+
+
+def can_dra_v6(product_type) -> bool:
+    """True when the device supports the DRA v6 (data-recovery) path."""
+    return _matches(product_type, _CAN_DRA_V6)
+
+
+def activation_record_mode(
+    product_type,
+    *,
+    saved_activation: bool = False,
+    mode: str = "Normal",
+    unactivated: bool = False,
+) -> Optional[int]:
+    """Return LIK's auto activation-record ladder code, or None.
+
+    Mirrors the `device_auto_actrec` ladder: 1 = A5/A6 `9900candidate` device in
+    Normal mode that is activated; 2 = a saved activation record exists for an
+    A4-or-older device; 3 = a device with a known activation issue in Normal
+    mode that is activated. The `--disable-actrec` override and on-disk
+    activation tar are the caller's concern; pass `saved_activation` to model
+    the latter.
+    """
+    proc = processor_generation(product_type)
+    normal_activated = mode == "Normal" and not unactivated
+    if proc in (5, 6) and is_9900_candidate(product_type) and normal_activated:
+        return 1
+    if saved_activation and proc <= 6:
+        return 2
+    if has_activation_issue(product_type) and normal_activated:
+        return 3
+    return None
+
+
+def powdersn0w_versions(product_type) -> Tuple[str, str]:
+    """Return LIK's `(check_vers, base_vers)` for a powdersn0w restore.
+
+    Defaults to ("7", "7.x"); the A5 (non-X) set narrows the check to 7.1
+    ("7.1.x"). On A4 (processor generation 4) both collapse to the device's
+    latest signed version instead.
+    """
+    proc = processor_generation(product_type)
+    if proc == 4:
+        latest = latest_version(product_type)
+        vers = latest[0] if latest else ""
+        return vers, vers
+    check = "7.1" if _matches(product_type, _POWDERSN0W_71) else "7"
+    return check, f"{check}.x"

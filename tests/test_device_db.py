@@ -300,3 +300,104 @@ def test_baseband_digests_are_sha1():
 )
 def test_baseband_flag(product_type, expected):
     assert db.baseband_flag(product_type) == expected
+
+
+@pytest.mark.parametrize(
+    "product_type,expected",
+    [
+        ("iPhone4,1", True),
+        ("iPhone5,2", True),
+        ("iPad2,7", True),
+        ("iPad3,2", True),
+        ("iPad3,6", True),
+        ("iPhone5,1", False),
+        ("iPad3,4", False),
+        (None, False),
+    ],
+)
+def test_is_9900_candidate(product_type, expected):
+    assert db.is_9900_candidate(product_type) is expected
+
+
+@pytest.mark.parametrize(
+    "product_type,expected",
+    [
+        ("iPhone1,1", True),
+        ("iPhone2,2", True),
+        ("iPhone3,2", True),
+        ("iPhone3,3", False),
+        ("iPad1,1", True),
+        ("iPad2,2", True),
+        ("iPad3,3", True),
+        ("iPad2,1", False),
+        (None, False),
+    ],
+)
+def test_has_activation_issue(product_type, expected):
+    assert db.has_activation_issue(product_type) is expected
+
+
+@pytest.mark.parametrize(
+    "product_type,expected",
+    [
+        ("iPhone3,1", True),
+        ("iPhone4,1", True),
+        ("iPhone5,2", True),
+        ("iPad1,1", True),
+        ("iPad2,4", True),
+        ("iPad3,6", True),
+        ("iPod3,1", True),
+        ("iPod5,1", True),
+        ("iPhone6,1", False),
+        ("iPod4,1", False),
+        (None, False),
+    ],
+)
+def test_can_powdersn0w(product_type, expected):
+    assert db.can_powdersn0w(product_type) is expected
+
+
+@pytest.mark.parametrize(
+    "product_type,expected",
+    [
+        ("iPad2,1", True),
+        ("iPhone4,1", True),
+        ("iPod4,1", True),
+        ("iPad2,2", False),
+        (None, False),
+    ],
+)
+def test_can_dra_v6(product_type, expected):
+    assert db.can_dra_v6(product_type) is expected
+
+
+@pytest.mark.parametrize(
+    "product_type,expected",
+    [
+        ("iPad2,4", ("7.1", "7.1.x")),
+        ("iPhone4,1", ("7.1", "7.1.x")),
+        ("iPhone5,1", ("7", "7.x")),
+        ("iPhone3,1", ("7.1.2", "7.1.2")),
+        ("iPhone2,1", ("6.1.6", "6.1.6")),
+    ],
+)
+def test_powdersn0w_versions(product_type, expected):
+    assert db.powdersn0w_versions(product_type) == expected
+
+
+@pytest.mark.parametrize(
+    "product_type,kwargs,expected",
+    [
+        ("iPhone4,1", {}, 1),
+        ("iPhone4,1", {"unactivated": True}, None),
+        ("iPhone4,1", {"mode": "Recovery"}, None),
+        ("iPhone4,1", {"saved_activation": True}, 1),
+        ("iPhone2,1", {"saved_activation": True}, 2),
+        ("iPhone1,1", {}, 3),
+        ("iPhone1,1", {"saved_activation": True}, 2),
+        ("iPhone1,1", {"unactivated": True}, None),
+        ("iPhone8,1", {}, None),
+    ],
+)
+def test_activation_record_mode(product_type, kwargs, expected):
+    assert db.activation_record_mode(product_type, **kwargs) == expected
