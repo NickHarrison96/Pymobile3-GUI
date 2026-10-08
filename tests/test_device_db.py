@@ -401,3 +401,105 @@ def test_powdersn0w_versions(product_type, expected):
 )
 def test_activation_record_mode(product_type, kwargs, expected):
     assert db.activation_record_mode(product_type, **kwargs) == expected
+
+
+@pytest.mark.parametrize(
+    "raw,base,expected",
+    [
+        ("0x1a2b", 16, 6699),
+        ("1a2b", 16, 6699),
+        ("0X1A2B", 16, 6699),
+        ("123456789", 10, 123456789),
+        (12345, 16, 12345),
+        ("", 16, None),
+        (None, 16, None),
+        ("zz", 16, None),
+    ],
+)
+def test_parse_ecid(raw, base, expected):
+    assert db.parse_ecid(raw, base=base) == expected
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (6699, "6699"),
+        ("6699", "6699"),
+        (None, ""),
+        ("", ""),
+        ("nope", ""),
+    ],
+)
+def test_format_ecid(raw, expected):
+    assert db.format_ecid(raw) == expected
+
+
+def test_parse_irecovery_mode():
+    text = "CPID: 8015\nMODEL: n71ap\nMODE: DFU\nECID: 1234\n"
+    assert db.parse_irecovery_mode(text) == "DFU"
+    assert db.parse_irecovery_mode("mode: Recovery") == "Recovery"
+    assert db.parse_irecovery_mode("no mode here") is None
+    assert db.parse_irecovery_mode("") is None
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("16.0.3", (16, 0)),
+        ("9", (9, 0)),
+        ("7.1", (7, 1)),
+        ("", None),
+        (None, None),
+        ("x.y", None),
+    ],
+)
+def test_parse_version(raw, expected):
+    assert db.parse_version(raw) == expected
+
+
+def test_manual_entry_from_hardware_model():
+    info = db.manual_entry(hardware_model="N71AP", ecid="123456789", version="9.0", build="13A344")
+    assert info["product_type"] == "iPhone8,1"
+    assert db.product_type_for_board("n71") == "iPhone8,1"
+    assert info["board"] == "n71"
+    assert db.parse_version("3.9") == (3, 9)
+    assert db.manual_entry(hardware_model="k93")["product_type"] == "iPad2,1"
+
+
+def test_manual_entry_derives_board_from_type():
+    info = db.manual_entry(device_type="iPhone6,1", ecid="123", version="9.3.5", build="13G36")
+    assert info["product_type"] == "iPhone6,1"
+    assert db.normalize_board(db.board_for_product_type("iPhone6,1")) == "n51"
+    assert db.info_from_irecovery(
+        "CPID: 8960\nMODEL: n51ap\nPRODUCT: iPhone6,1\nMODE: DFU\nECID: 1a2b\n"
+    )["board"] == "n51"
+
+
+def test_manual_entry_decimal_ecid():
+    entry = db.manual_entry(device_type="iPhone6,1", ecid="1234567890")
+    assert entry["ecid"] == 1234567890
+
+
+def test_manual_entry_defaults():
+    entry = db.manual_entry()
+    assert entry["product_type"] == ""
+    assert db.manual_entry(device_type=None)["board"] == ""
+    assert db.manual_entry(device_type="iPhone8,1")["board"] == ""
+    assert db.manual_entry(hardware_model="n71").get("version", "") == ""
+
+
+def test_info_from_irecovery():
+    text = (
+        "CPID: 8015\nMODEL: n71ap\nPRODUCT: iPhone8,1\n"
+        "MODE: DFU\nECID: 123456789abcd\nPWND: CHECKM8\n"
+    )
+    info = db.info_from_irecovery(text)
+    assert info == {
+        "mode": "DFU",
+        "product_type": "iPhone8,1",
+        "board": "n71",
+        "ecid": int("123456789abcd", 16),
+        "pwned": True,
+    }
+    assert db.info_from_irecovery("") is None
+    assert db.info_from_irecovery(None) is None

@@ -42,6 +42,12 @@ __all__ = [
     "can_powdersn0w",
     "powdersn0w_versions",
     "can_dra_v6",
+    "parse_ecid",
+    "format_ecid",
+    "parse_irecovery_mode",
+    "parse_version",
+    "manual_entry",
+    "info_from_irecovery",
 ]
 
 
@@ -549,3 +555,118 @@ def powdersn0w_versions(product_type) -> Tuple[str, str]:
         return vers, vers
     check = "7.1" if _matches(product_type, _POWDERSN0W_71) else "7"
     return check, f"{check}.x"
+
+
+_MODE_RE = re.compile(r"^\s*MODE\s*[:=]\s*(\S+)", re.IGNORECASE | re.MULTILINE)
+
+
+def parse_ecid(raw, *, base: int = 16) -> Optional[int]:
+    """Parse an ECID into an int.
+
+    `irecovery -q` prints the ECID as hex (usually without a "0x" prefix), so
+    `base=16` is the default. Lockdown/`ideviceinfo` and manual entry give
+    decimal, so pass `base=10` there. An int passes through; "" / None /
+    unparseable values return None.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, int):
+        return raw
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return int(text, base)
+    except ValueError:
+        return None
+
+
+def format_ecid(ecid) -> str:
+    """Render an ECID as LIK does for logging: a plain decimal string."""
+    if ecid is None:
+        return ""
+    if isinstance(ecid, str) and not ecid.strip():
+        return ""
+    try:
+        return str(int(ecid))
+    except (TypeError, ValueError):
+        return ""
+
+
+def parse_irecovery_mode(text) -> Optional[str]:
+    """Return the MODE field from `irecovery -q` output (e.g. "DFU"), or None."""
+    if not text:
+        return None
+    match = _MODE_RE.search(str(text))
+    return match.group(1) if match else None
+
+
+def parse_version(raw) -> Optional[Tuple[int, int]]:
+    """Split an iOS version into (major, minor); None when it has no number.
+
+    LIK only ever needs the major and minor components ("7.1.2" -> (7, 1));
+    a missing minor component reads as 0.
+    """
+    if raw is None:
+        return None
+    parts = str(raw).strip().split(".")
+    if not parts or not parts[0].isdigit():
+        return None
+    major = int(parts[0])
+    minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    return major, minor
+
+
+def manual_entry(
+    *,
+    device_type=None,
+    hardware_model=None,
+    ecid=None,
+    version=None,
+    build=None,
+    mode: str = "Normal",
+) -> Dict[str, object]:
+    """Build a device-info dict from hand-entered values.
+
+    Covers devices where lockdown reports nothing (iOS 2.x and older). The
+    ProductType and board backfill each other when only one is given, and the
+    ECID is treated as decimal (as LIK's manual entry and `ideviceinfo` do).
+    """
+    product_type = str(device_type).strip() if device_type else ""
+    if not product_type and hardware_model:
+        product_type = product_type_for_board(hardware_model) or ""
+    if hardware_model:
+        board = normalize_board(hardware_model)
+    elif product_type:
+        board = board_for_product_type(product_type) or ""
+    else:
+        board = ""
+    return {
+        "mode": mode or "Normal",
+        "product_type": product_type,
+        "board": board,
+        "ecid": parse_ecid(ecid, base=10) if ecid not in (None, "") else None,
+        "version": (version or "").strip(),
+        "build": (build or "").strip(),
+    }
+
+
+def info_from_irecovery(text) -> Optional[dict]:
+    """Parse `irecovery -q` output into the device_db shape, or None.
+
+    Thin wrapper around `ramdisk_manager.parse_device_info` that adds the
+    decimal ECID and the normalized board id; the irecovery parser itself is
+    not duplicated.
+    """
+    from .ramdisk_manager import parse_device_info
+
+    dev = parse_device_info(text) if text else None
+    if dev is None:
+        return None
+    return {
+        "mode": dev.get("mode", ""),
+        "product_type": dev.get("product", ""),
+        "board": normalize_board(dev.get("model", "")),
+        "ecid": parse_ecid(dev.get("ecid", "")),
+        "pwned": bool(dev.get("pwned")),
+    }
