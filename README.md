@@ -1,38 +1,38 @@
----
-
-
-<img width="1920" height="1040" alt="ggg" src="https://github.com/user-attachments/assets/ea2f0dcc-0d2a-4ae9-a766-a950067d25f6" />
-
-
----
-# NOTICE!: Super Early Pre-Alpha Stage, Constantly being updated. 
 # Pymobile3-GUI
 
-**Standalone iOS forensic & developer toolkit** — extracted from RootForgeKit.
+**Standalone iOS forensic & developer toolkit for Windows**
 
-A native-feel PySide6 desktop application for Windows 10/11 with Mica/Acrylic backdrop, full-page workspaces, and real-time operation telemetry.
+A native-feel PySide6 desktop application for Windows 10/11 with Mica/Acrylic backdrop, full-page workspaces, and real-time operation telemetry. Extracted from [RootForgeKit](https://github.com/NickHarrison96/RootForgeKit).
 
-## Features
+Built for forensic examiners, independent repair technicians, and security researchers who need practical, local tools for iOS device inspection, acquisition, and developer workflows.
 
-- **Device Overview** — Hardware specs, battery, activation state, developer mode status + lockdown control panel (rename, assistive touch, Wi-Fi connections, battery detail)
+> **Status:** Actively developed pre-alpha. Features are landing quickly — expect occasional breaking changes. Tested on real hardware; always work on devices you can afford to experiment with and keep backups.
+
+---
+
+### Key Capabilities
+
+- **Device Overview** — Hardware specs, battery, activation state, developer mode status + lockdown control panel (rename, AssistiveTouch, Wi-Fi connections, battery detail)
 - **Files & Applications** — AFC file browser, installed apps inspector, DCIM media quick access, crash reports explorer (browse, parse, export, pull)
-- **Forensic Acquisition** — Logical, Logical+, PRFS modes with live progress, case metadata, TAR archiving
+- **Forensic Acquisition** — Logical, Logical+, and PRFS modes with live progress, case metadata, and TAR archiving
 - **Developer Tools** — Progressive readiness pipeline (Dev Mode → DDI → RSD Tunnel) + DVT instruments (process monitor with search/kill/launch, bundle-id lookup, system monitor, screenshot, GPS simulation)
-- **Recovery & Restore** — IPSW firmware flashing via `idevicerestore`, iTunes-style backup restore (with encrypted-backup password support), interactive Recovery/DFU hardware guides
-- **Live Syslog** — Streaming console with filtering, pause/resume, export
-- **SSH Ramdisk** — checkm8 ramdisk create/boot for A7-A11 & T2 devices, device erase, on-board SHSH dump, SSH console
-- **A12/A13 Ramdisk (experimental)** — usbliter8 SSH ramdisk for A12/A13; fetch + patch the bootchain here, load it from Recovery
+- **Recovery & Restore** — IPSW firmware flashing via `idevicerestore`, iTunes-style backup restore (encrypted backups supported), interactive Recovery/DFU hardware guides
+- **Live Syslog** — Streaming console with filtering, pause/resume, and export
+- **SSH Ramdisk** — checkm8 ramdisk create/boot for A7–A11 & T2 devices, device erase, on-board SHSH dump, SSH console
+- **A12/A13 Ramdisk (experimental)** — usbliter8 SSH ramdisk support; fetch + patch the bootchain, load from Recovery
+
+---
 
 ## Requirements
 
 - Python 3.10+
-- Physical iOS device (iOS 17+ needs RSD tunnel)
-- Administrator/root for tunnel interface creation (iOS 17+)
+- Physical iOS device (iOS 17+ requires an RSD tunnel)
+- Administrator privileges for tunnel interface creation on iOS 17+
 
 ## Quick Start
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/NickHarrison96/Pymobile3-GUI.git
 cd Pymobile3-GUI
 python -m venv .venv
 .venv\Scripts\activate      # macOS/Linux: source .venv/bin/activate
@@ -40,7 +40,7 @@ pip install -r requirements.txt
 python -m pymobile3_gui.main
 ```
 
-## Building Standalone Executable (Windows)
+## Building a Standalone Executable (Windows)
 
 ```bash
 pip install pyinstaller
@@ -48,6 +48,8 @@ python -m PyInstaller pymobile3_gui.spec --noconfirm
 ```
 
 Produces `dist_pymobile3/Pymobile3-GUI/Pymobile3-GUI.exe` (onedir bundle).
+
+---
 
 ## Architecture
 
@@ -72,39 +74,46 @@ pymobile3_gui/
 └── assets/                    # Fonts, SVG icons
 ```
 
+---
+
 ## iOS 17+ Developer Services
 
-iOS 17+ moved all developer services (DVT instruments, proclist, screenshot, location simulation, app launch) behind RemoteXPC, reachable only through an RSD tunnel.
+iOS 17+ moved all developer services (DVT instruments, process list, screenshot, location simulation, app launch) behind RemoteXPC. These are only reachable through an RSD tunnel.
 
 **Developer view readiness pipeline:**
+
 1. **Enable Dev Mode** — `amfi enable-developer-mode` (device reboots)
 2. **Mount DDI** — `mounter auto-mount` (Developer Disk Image)
 3. **Start Tunnel** — Launches `pymobiledevice3 remote tunneld` elevated
 
-When "Developer services" reads green, DVT tabs are functional.
+When "Developer services" reads green, the DVT tabs become functional.
+
+---
 
 ## SSH Ramdisk (checkm8 Devices)
 
-The **SSH Ramdisk** tab in Recovery & Restore ports [SSHRD_Script](https://github.com/verygenericname/SSHRD_Script) into the GUI for A7-A11 and T2 devices (CPID `0x8960`/`0x7000`/`0x7001`/`0x8000`/`0x8003`/`0x8010`/`0x8011`/`0x8012`/`0x8015`):
+The **SSH Ramdisk** tab in Recovery & Restore ports [SSHRD_Script](https://github.com/verygenericname/SSHRD_Script) into the GUI for A7–A11 and T2 devices (CPID `0x8960` / `0x7000` / `0x7001` / `0x8000` / `0x8003` / `0x8010` / `0x8011` / `0x8012` / `0x8015`):
 
-- **Create** — build a ramdisk from a signed IPSW (ipsw.me version lookup, partial downloads via `pzb`)
+- **Create** — Build a ramdisk from a signed IPSW (ipsw.me version lookup, partial downloads via `pzb`)
 - **Boot / Erase / Reboot** — checkm8 pwn via gaster, bootchain delivery via irecovery
-- **Dump SHSH Blobs** — read on-board blobs over SSH (iproxy + paramiko)
-- **Open SSH Console** — root shell at `localhost:2222` while the ramdisk runs
+- **Dump SHSH Blobs** — Read on-board blobs over SSH (iproxy + paramiko)
+- **Open SSH Console** — Root shell at `localhost:2222` while the ramdisk runs
 
-Requirements:
+**Requirements for SSH Ramdisk:**
 
-- **WSL (Ubuntu)** — build steps run the bundled Linux tools (`img4`, `img4tool`, `hfsplus`, `pzb`, `iBoot64Patcher`, ...) inside WSL; DFU/USB steps run natively on Windows through the vendored exes in `assets/sshrd/win/`
+- **WSL (Ubuntu)** — Build steps run the bundled Linux tools (`img4`, `img4tool`, `hfsplus`, `pzb`, `iBoot64Patcher`, …) inside WSL; DFU/USB steps run natively on Windows through the vendored executables in `assets/sshrd/win/`
 - **DFU mode** with a WinUSB/libusbk driver (Zadig) on the Apple DFU device
 - iOS **16.0 or older** for the build step (upstream `sshrd.sh` Linux branch refuses 16.1+)
 
-All binaries, SHSH blobs and payload tars are vendored in `pymobile3_gui/assets/sshrd/` — only IPSW firmware parts are downloaded, on first build. Run the offline test suite with `pytest`.
+All binaries, SHSH blobs, and payload tars are vendored in `pymobile3_gui/assets/sshrd/` — only IPSW firmware parts are downloaded on first build. Run the offline test suite with `pytest`.
+
+---
 
 ## Roadmap
 
 ### Done & verified
 
-- Lockdown control panel (rename, assistive touch, Wi-Fi, battery)
+- Lockdown control panel (rename, AssistiveTouch, Wi-Fi, battery)
 - Crash reports explorer (browse, parse, export, pull)
 - Backup restore-to-device (encrypted backups supported)
 - DVT instruments — process monitor, kill/launch, system monitor, screenshot, GPS (power assertion unavailable on iOS 26.5)
@@ -140,6 +149,8 @@ All binaries, SHSH blobs and payload tars are vendored in `pymobile3_gui/assets/
 - **Mounting `/var/mobile` in the SSH ramdisk** — the checkm8 ramdisk boots and SSH works, but the NAND data volume is not exposed. Candidate fix: `mount_ich` from the A12-A13-Ramdisk payload (`docs/TODO.md` §6.3)
 - **Frozen-binary verification** — the PyInstaller build has not been tested end-to-end
 
+---
+
 ## License
 
-MIT — see LICENSE file.
+MIT — see [LICENSE](LICENSE) file.
